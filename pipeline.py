@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
+import shutil
 import sys
 from datetime import datetime
 
@@ -29,7 +30,6 @@ from prompts import (
     STEP1_SYS, STEP1_USR,
     STEP2_SYS, STEP2_USR,
     STEP3_SYS, STEP3_USR,
-    STEP5_SYS, STEP5_USR,
     STEP6_SYS, STEP6_USR,
     STEP7_SYS, STEP7_USR,
 )
@@ -38,6 +38,7 @@ from steps import (
     get_pdf_page_count,
     call_vision,
     call_text,
+    run_preflight_checks,
     extract_block,
     normalize_latex_source,
     is_latex_document,
@@ -45,12 +46,32 @@ from steps import (
     merge_pages,
     finalize_report,
 )
-from glossary_db import (
-    get_db_path,
-    init_db,
-    fetch_terms_for_paper,
-    upsert_terms,
-)
+
+
+def pipeline_state_path(output_dir: str, name: str) -> str:
+    return os.path.join(output_dir, f"{name}_pipeline_state.json")
+
+
+def load_pipeline_state(output_dir: str, name: str) -> dict:
+    path = pipeline_state_path(output_dir, name)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save_pipeline_state(output_dir: str, name: str, state: dict) -> str:
+    path = pipeline_state_path(output_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+    return path
+
+
+def copy_source_pdf(input_pdf: str, output_dir: str, name: str) -> str:
+    source_copy_path = os.path.join(output_dir, f"{name}_source.pdf")
+    if os.path.abspath(input_pdf) != os.path.abspath(source_copy_path):
+        shutil.copyfile(input_pdf, source_copy_path)
+    return source_copy_path
 
 
 def parse_page_range(pages_str: str, total: int) -> list[int]:
@@ -170,6 +191,18 @@ def chunked(items: list, size: int) -> list[list]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def page_tex_path(output_dir: str, page_num: int) -> str:
+    return os.path.join(output_dir, f"page_{page_num:03d}.tex")
+
+
+def page_structure_path(output_dir: str, page_num: int) -> str:
+    return os.path.join(output_dir, f"page_{page_num:03d}_structure.json")
+
+
+def page_failure_path(output_dir: str, page_num: int) -> str:
+    return os.path.join(output_dir, f"page_{page_num:03d}_failure.json")
+
+
 def run_pipeline(
     input_pdf: str,
     name: str,
@@ -181,11 +214,28 @@ def run_pipeline(
     workers: int = 4,
     resume: bool = True,
     translation_chunk_pages: int = 4,
+    retry_pages: str | None = None,
 ):
     """Run the full STEP 0 ??8 pipeline."""
-    glossary_db_path = get_db_path()
-    init_db(glossary_db_path)
+    print("[PREFLIGHT] Checking environment...")
+    preflight = run_preflight_checks()
+    for check in preflight["checks"]:
+        print(f"  [{check['status'].upper()}] {check['name']}: {check['message']}")
+    if not preflight["ok"]:
+        failures = [
+            f"{check['name']}: {check['message']}"
+            for check in preflight["checks"]
+            if check["status"] == "error"
+        ]
+        raise RuntimeError(
+            "Preflight failed:\n- " + "\n- ".join(failures)
+        )
+
     os.makedirs(output_dir, exist_ok=True)
+    source_pdf_path = copy_source_pdf(input_pdf, output_dir, name)
+    existing_state = load_pipeline_state(output_dir, name)
+    force_rebuild_downstream = bool(retry_pages)
+    total_input_pages = get_pdf_page_count(input_pdf)
     images_dir = os.path.join(output_dir, "images")
     print("\n[RIGHTS] Running rights check heuristic...")
     meta_author = author
@@ -206,34 +256,76 @@ def run_pipeline(
     # ?? STEP 0: PDF ??Images ????????????????????????????????????????????
     print("\n[STEP 0] Converting PDF to images...")
     page_numbers = None
-    if pages:
-        total_pages = get_pdf_page_count(input_pdf)
-        selected = parse_page_range(pages, total_pages)
+    state_requested_pages = existing_state.get("requested_pages")
+    if retry_pages:
+        selected = parse_page_range(retry_pages, total_input_pages)
         page_numbers = selected
-        print(f"  Total pages: {total_pages}")
-        print(f"  Selected pages: {[i+1 for i in selected]}")
-    image_paths = pdf_to_images(input_pdf, images_dir, page_numbers=page_numbers)
-    total_pages = get_pdf_page_count(input_pdf) if pages else len(image_paths)
-    if not pages:
-        print(f"  Total pages: {total_pages}")
+        requested_page_numbers = [
+            int(page)
+            for page in (state_requested_pages or list(range(1, total_input_pages + 1)))
+        ]
+        print(f"  Total pages: {total_input_pages}")
+        print(f"  Retrying pages: {[i + 1 for i in selected]}")
+    elif pages:
+        selected = parse_page_range(pages, total_input_pages)
+        page_numbers = selected
+        requested_page_numbers = [i + 1 for i in selected]
+        print(f"  Total pages: {total_input_pages}")
+        print(f"  Selected pages: {[i + 1 for i in selected]}")
+    else:
+        requested_page_numbers = list(range(1, total_input_pages + 1))
+        print(f"  Total pages: {total_input_pages}")
 
-    num_pages = len(image_paths)
+    image_paths = pdf_to_images(input_pdf, images_dir, page_numbers=page_numbers)
+    if page_numbers is None:
+        page_jobs = [(idx + 1, path) for idx, path in enumerate(image_paths)]
+    else:
+        page_jobs = [(page_idx + 1, path) for page_idx, path in zip(page_numbers, image_paths)]
+
+    num_pages = len(requested_page_numbers)
+    state = {
+        "paper_name": name,
+        "source_pdf": source_pdf_path,
+        "input_pdf": os.path.abspath(input_pdf),
+        "output_dir": os.path.abspath(output_dir),
+        "requested_pages": requested_page_numbers,
+        "last_rendered_pages": [page_num for page_num, _ in page_jobs],
+        "pages_arg": pages,
+        "retry_pages_arg": retry_pages,
+        "author": author,
+        "publication_year": publication_year,
+        "death_year": death_year,
+        "workers": workers,
+        "translation_chunk_pages": translation_chunk_pages,
+        "checked_at": datetime.now().isoformat(),
+        "failed_pages": existing_state.get("failed_pages", []),
+        "failed_page_details": existing_state.get("failed_page_details", []),
+        "successful_pages": existing_state.get("successful_pages", []),
+    }
+    save_pipeline_state(output_dir, name, state)
 
     # ?? STEP 1 & 2: Per-page structure analysis + LaTeX transcription ???
-    page_latex_sources = [None] * num_pages
     all_transcription_notes = []
+    failure_by_page = {
+        int(item["page_number"]): item
+        for item in existing_state.get("failed_page_details", [])
+        if (
+            isinstance(item, dict)
+            and item.get("page_number") is not None
+            and int(item["page_number"]) in requested_page_numbers
+        )
+    }
 
-    def process_page(idx_img: tuple[int, str]) -> tuple[int, str, str | None]:
-        idx, img_path = idx_img
-        page_num = idx + 1
-        struct_path = os.path.join(output_dir, f"page_{page_num:03d}_structure.json")
-        page_tex_path = os.path.join(output_dir, f"page_{page_num:03d}.tex")
+    def process_page(page_job: tuple[int, str]) -> tuple[int, str, str | None]:
+        page_num, img_path = page_job
+        struct_path = page_structure_path(output_dir, page_num)
+        tex_path = page_tex_path(output_dir, page_num)
 
-        if resume and os.path.exists(struct_path) and os.path.exists(page_tex_path):
-            with open(page_tex_path, encoding="utf-8") as f:
+        if resume and os.path.exists(struct_path) and os.path.exists(tex_path):
+            with open(tex_path, encoding="utf-8") as f:
                 latex_source = normalize_latex_source(f.read())
             print(f"\n[STEP 1/2] Reusing cached page {page_num}/{num_pages}...")
-            return idx, latex_source, None
+            return page_num, latex_source, None
 
         print(f"\n[STEP 1] Analyzing structure ??page {page_num}/{num_pages}...")
         structure_json = call_vision(STEP1_SYS, f"{rights_context}\n\n{STEP1_USR}", img_path)
@@ -271,19 +363,60 @@ def run_pipeline(
             raise RuntimeError(
                 f"STEP 2 failed: malformed LaTeX on page {page_num} after 3 attempts."
             )
-        with open(page_tex_path, "w", encoding="utf-8") as f:
+        with open(tex_path, "w", encoding="utf-8") as f:
             f.write(latex_source)
-        print(f"  LaTeX saved: {page_tex_path}")
+        print(f"  LaTeX saved: {tex_path}")
         notes = extract_block(transcription_response, "TRANSCRIPTION_NOTES")
-        return idx, latex_source, notes
+        return page_num, latex_source, notes
 
-    first_idx, first_latex, first_notes = process_page((0, image_paths[0]))
-    page_latex_sources[first_idx] = first_latex
-    if first_notes:
-        all_transcription_notes.append(f"--- Page {first_idx + 1} ---\n{first_notes}")
+    def process_page_safe(page_job: tuple[int, str]) -> dict:
+        page_num, img_path = page_job
+        try:
+            result_page, latex_source, notes = process_page(page_job)
+            failure_by_page.pop(page_num, None)
+            failure_path = page_failure_path(output_dir, page_num)
+            if os.path.exists(failure_path):
+                os.remove(failure_path)
+            return {
+                "ok": True,
+                "page_number": result_page,
+                "latex_source": latex_source,
+                "notes": notes,
+            }
+        except Exception as exc:
+            message = str(exc).strip() or exc.__class__.__name__
+            failure = {
+                "page_number": page_num,
+                "stage": "step1_2",
+                "status": "failed",
+                "error": message,
+                "image_path": img_path,
+                "structure_path": page_structure_path(output_dir, page_num),
+                "tex_path": page_tex_path(output_dir, page_num),
+                "updated_at": datetime.now().isoformat(),
+            }
+            failure_by_page[page_num] = failure
+            with open(page_failure_path(output_dir, page_num), "w", encoding="utf-8") as f:
+                json.dump(failure, f, ensure_ascii=False, indent=2)
+            print(
+                f"\n[STEP 1/2] WARNING: page {page_num}/{num_pages} failed and will be skipped."
+            )
+            print(f"  [STEP 1/2] Reason: {message}")
+            return {"ok": False, "page_number": page_num, "failure": failure}
 
-    if rights_info.get("assessment") == "unknown":
-        first_struct_path = os.path.join(output_dir, "page_001_structure.json")
+    successful_results = []
+    if page_jobs:
+        first_result = process_page_safe(page_jobs[0])
+        if first_result["ok"]:
+            successful_results.append(first_result)
+            if first_result.get("notes"):
+                all_transcription_notes.append(
+                    f"--- Page {first_result['page_number']} ---\n{first_result['notes']}"
+                )
+
+    if rights_info.get("assessment") == "unknown" and successful_results:
+        first_success_num = successful_results[0]["page_number"]
+        first_struct_path = page_structure_path(output_dir, first_success_num)
         if os.path.exists(first_struct_path):
             with open(first_struct_path, encoding="utf-8") as f:
                 first_structure_json = f.read()
@@ -308,32 +441,93 @@ def run_pipeline(
                     f"({rights_info['reason']})"
                 )
 
-    remaining = list(enumerate(image_paths))[1:]
+    remaining = page_jobs[1:]
     max_workers = max(1, min(workers, len(remaining))) if remaining else 1
     if remaining and max_workers > 1:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(process_page, item) for item in remaining]
+            futures = [executor.submit(process_page_safe, item) for item in remaining]
             for future in as_completed(futures):
-                idx, latex_source, notes = future.result()
-                page_latex_sources[idx] = latex_source
-                if notes:
-                    all_transcription_notes.append(f"--- Page {idx + 1} ---\n{notes}")
+                result = future.result()
+                if result["ok"]:
+                    successful_results.append(result)
+                    if result.get("notes"):
+                        all_transcription_notes.append(
+                            f"--- Page {result['page_number']} ---\n{result['notes']}"
+                        )
     elif remaining:
         for item in remaining:
-            idx, latex_source, notes = process_page(item)
-            page_latex_sources[idx] = latex_source
-            if notes:
-                all_transcription_notes.append(f"--- Page {idx + 1} ---\n{notes}")
+            result = process_page_safe(item)
+            if result["ok"]:
+                successful_results.append(result)
+                if result.get("notes"):
+                    all_transcription_notes.append(
+                        f"--- Page {result['page_number']} ---\n{result['notes']}"
+                    )
 
-    page_latex_sources = [src for src in page_latex_sources if src]
+    successful_page_numbers = []
+    page_latex_sources = []
+    for page_num in requested_page_numbers:
+        tex_path = page_tex_path(output_dir, page_num)
+        if not os.path.exists(tex_path):
+            continue
+        with open(tex_path, encoding="utf-8") as f:
+            source = normalize_latex_source(f.read())
+        if not is_latex_document(source):
+            failure = {
+                "page_number": page_num,
+                "stage": "step1_2",
+                "status": "failed",
+                "error": "Cached page TeX is malformed and cannot be merged.",
+                "image_path": os.path.join(images_dir, f"page_{page_num:03d}.png"),
+                "structure_path": page_structure_path(output_dir, page_num),
+                "tex_path": tex_path,
+                "updated_at": datetime.now().isoformat(),
+            }
+            failure_by_page[page_num] = failure
+            with open(page_failure_path(output_dir, page_num), "w", encoding="utf-8") as f:
+                json.dump(failure, f, ensure_ascii=False, indent=2)
+            continue
+        successful_page_numbers.append(page_num)
+        page_latex_sources.append(source)
+
+    failed_page_details = [failure_by_page[page] for page in sorted(failure_by_page)]
+    failed_page_numbers = [item["page_number"] for item in failed_page_details]
+    state.update(
+        {
+            "failed_pages": failed_page_numbers,
+            "failed_page_details": failed_page_details,
+            "successful_pages": successful_page_numbers,
+            "checked_at": datetime.now().isoformat(),
+        }
+    )
+    if (
+        existing_state.get("successful_pages") != successful_page_numbers
+        or existing_state.get("failed_pages") != failed_page_numbers
+    ):
+        force_rebuild_downstream = True
+    save_pipeline_state(output_dir, name, state)
     # Save transcription notes
     if all_transcription_notes:
         notes_path = os.path.join(output_dir, f"{name}_transcription_notes.txt")
         with open(notes_path, "w", encoding="utf-8") as f:
             f.write("\n\n".join(all_transcription_notes))
 
+    if failed_page_numbers:
+        print(
+            f"\n[STEP 1/2] Partial success: skipped failed page(s) {failed_page_numbers} "
+            "and continuing with completed pages."
+        )
+    if not page_latex_sources:
+        raise RuntimeError(
+            "No pages were successfully transcribed. Nothing to merge. "
+            "Use the retry flow after fixing the model refusal/problem."
+        )
+
     # ?? Merge pages ?????????????????????????????????????????????????????
-    print(f"\n[MERGE] Merging {num_pages} page(s)...")
+    print(
+        f"\n[MERGE] Merging {len(successful_page_numbers)} successful page(s) "
+        f"out of {num_pages} requested..."
+    )
     merged_latex = merge_pages(page_latex_sources)
     if not is_latex_document(merged_latex):
         raise RuntimeError("Merged LaTeX is malformed. Aborting before compilation.")
@@ -346,7 +540,13 @@ def run_pipeline(
     final_dig_tex = os.path.join(output_dir, f"{name}_digitalized.tex")
     dig_pdf = os.path.join(output_dir, f"{name}_digitalized.pdf")
     dig_err_log = os.path.join(output_dir, f"{name}_digitalized_error.log")
-    if resume and os.path.exists(final_dig_tex) and os.path.exists(dig_pdf) and not os.path.exists(dig_err_log):
+    if (
+        resume
+        and not force_rebuild_downstream
+        and os.path.exists(final_dig_tex)
+        and os.path.exists(dig_pdf)
+        and not os.path.exists(dig_err_log)
+    ):
         print("\n[STEP 3] Reusing cached digitalized PDF/TeX...")
         with open(final_dig_tex, encoding="utf-8") as f:
             final_dig_latex = f.read()
@@ -376,41 +576,14 @@ def run_pipeline(
         print("  [STEP 4] WARNING: Digitalized PDF compilation failed.")
 
     # ?? STEP 5: Glossary ????????????????????????????????????????????????
-    glossary = []
-    if resume:
-        glossary = fetch_terms_for_paper(glossary_db_path, name)
-        if glossary:
-            print("\n[STEP 5] Reusing cached glossary from DB...")
-
-    if not glossary:
-        print("\n[STEP 5] Building glossary...")
-        step5_user = STEP5_USR.format(digitalized_latex_source=final_dig_latex)
-        glossary_response = call_text(STEP5_SYS, step5_user)
-
-        # Parse glossary JSON
-        try:
-            glossary = json.loads(glossary_response)
-        except json.JSONDecodeError:
-            # Try to extract JSON array from response
-            m = re.search(r"\[.*\]", glossary_response, re.DOTALL)
-            if m:
-                try:
-                    glossary = json.loads(m.group())
-                except json.JSONDecodeError:
-                    print("  WARNING: Could not parse glossary JSON.")
-
-        upsert_terms(glossary_db_path, glossary, source_paper=name)
-    print(f"  Glossary saved to DB: {glossary_db_path} ({len(glossary)} terms)")
-
     korean_tex_path = os.path.join(output_dir, f"{name}_Korean.tex")
     tnotes_path = os.path.join(output_dir, f"{name}_translation_notes.txt")
-    if resume and os.path.exists(korean_tex_path):
-        print("\n[STEP 6] Reusing cached Korean LaTeX...")
+    if resume and not force_rebuild_downstream and os.path.exists(korean_tex_path):
+        print("\n[TRANSLATE] Reusing cached Korean LaTeX...")
         with open(korean_tex_path, encoding="utf-8") as f:
             korean_latex = f.read()
     else:
-        print("\n[STEP 6] Translating to Korean...")
-        glossary_json_str = json.dumps(glossary, ensure_ascii=False, indent=2)
+        print("\n[TRANSLATE] Translating to Korean...")
         page_docs = split_latex_into_page_docs(final_dig_latex)
         groups = chunked(page_docs, translation_chunk_pages) if len(page_docs) > translation_chunk_pages else [page_docs]
 
@@ -418,9 +591,8 @@ def run_pipeline(
         notes_all = []
         for chunk_idx, docs in enumerate(groups, start=1):
             chunk_source = merge_pages(docs)
-            print(f"  [STEP 6] Translating chunk {chunk_idx}/{len(groups)}...")
+            print(f"  [TRANSLATE] Translating chunk {chunk_idx}/{len(groups)}...")
             step6_user = STEP6_USR.format(
-                glossary_json=glossary_json_str,
                 digitalized_latex_source=chunk_source,
             )
             translation_response = call_text(STEP6_SYS, step6_user, max_tokens=16384)
@@ -431,15 +603,6 @@ def run_pipeline(
             chunk_korean = normalize_latex_source(chunk_korean)
             translated_docs.append(chunk_korean)
 
-            glossary_updates_str = extract_block(translation_response, "GLOSSARY_UPDATES")
-            if glossary_updates_str:
-                try:
-                    updates = json.loads(glossary_updates_str)
-                    if isinstance(updates, list):
-                        glossary.extend(updates)
-                except json.JSONDecodeError:
-                    pass
-
             translation_notes = extract_block(translation_response, "TRANSLATION_NOTES")
             if translation_notes:
                 notes_all.append(f"--- Chunk {chunk_idx} ---\n{translation_notes}")
@@ -447,7 +610,6 @@ def run_pipeline(
         korean_latex = merge_pages(translated_docs) if len(translated_docs) > 1 else translated_docs[0]
         with open(korean_tex_path, "w", encoding="utf-8") as f:
             f.write(korean_latex)
-        upsert_terms(glossary_db_path, glossary, source_paper=name)
         if notes_all:
             with open(tnotes_path, "w", encoding="utf-8") as f:
                 f.write("\n\n".join(notes_all))
@@ -456,14 +618,19 @@ def run_pipeline(
     # ?? STEP 7: Compile Korean PDF (xelatex) + auto-fix ?????????????????
     kor_pdf = os.path.join(output_dir, f"{name}_Korean.pdf")
     kor_err_log = os.path.join(output_dir, f"{name}_Korean_error.log")
-    if resume and os.path.exists(kor_pdf) and not os.path.exists(kor_err_log):
-        print("\n[STEP 7] Reusing cached Korean PDF...")
+    if (
+        resume
+        and not force_rebuild_downstream
+        and os.path.exists(kor_pdf)
+        and not os.path.exists(kor_err_log)
+    ):
+        print("\n[KOREAN PDF] Reusing cached Korean PDF...")
         kor_ok = True
         final_kor_latex = korean_latex
     else:
         if os.path.exists(kor_err_log):
-            print("\n[STEP 7] Found previous error log; recompiling Korean PDF...")
-        print("\n[STEP 7] Compiling Korean PDF (xelatex)...")
+            print("\n[KOREAN PDF] Found previous error log; recompiling Korean PDF...")
+        print("\n[KOREAN PDF] Compiling Korean PDF (xelatex)...")
         kor_ok, final_kor_latex, kor_pdf = auto_fix_loop(
             korean_latex,
             output_dir,
@@ -485,25 +652,39 @@ def run_pipeline(
         print("  WARNING: Korean PDF compilation failed.")
 
     # ?? STEP 8: Quality report ??????????????????????????????????????????
-    print("\n[STEP 8] Generating quality report...")
+    print("\n[REPORT] Generating quality report...")
     finalize_report(
         name,
         num_pages,
         dig_ok,
         kor_ok,
-        len(glossary),
         output_dir,
-        glossary_db_path=glossary_db_path,
+        successful_pages=len(successful_page_numbers),
+        failed_pages=failed_page_numbers,
     )
+
+    state.update(
+        {
+            "digitalized_compiled": dig_ok,
+            "korean_compiled": kor_ok,
+            "failed_pages": failed_page_numbers,
+            "failed_page_details": failed_page_details,
+            "successful_pages": successful_page_numbers,
+            "checked_at": datetime.now().isoformat(),
+        }
+    )
+    save_pipeline_state(output_dir, name, state)
 
     # ?? Summary ?????????????????????????????????????????????????????????
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETE")
     print("=" * 60)
     print(f"  Pages processed:    {num_pages}")
+    print(f"  Pages merged:       {len(successful_page_numbers)}")
+    if failed_page_numbers:
+        print(f"  Failed pages:       {failed_page_numbers}")
     print(f"  Digitalized PDF:    {'OK' if dig_ok else 'FAILED'}")
     print(f"  Korean PDF:         {'OK' if kor_ok else 'FAILED'}")
-    print(f"  Glossary terms:     {len(glossary)}")
     print(f"  Output directory:   {output_dir}")
     print("=" * 60)
 
@@ -522,6 +703,7 @@ def main():
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for page-level STEP 1/2")
     parser.add_argument("--no-resume", action="store_true", help="Disable cache/resume and recompute all steps")
     parser.add_argument("--translation-chunk-pages", type=int, default=4, help="Pages per translation chunk in STEP 6")
+    parser.add_argument("--retry-pages", default=None, help="Retry only the given page range, e.g. '12' or '3,7'")
 
     args = parser.parse_args()
 
@@ -540,6 +722,7 @@ def main():
         args.workers,
         not args.no_resume,
         args.translation_chunk_pages,
+        args.retry_pages,
     )
 
 

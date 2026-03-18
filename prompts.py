@@ -87,18 +87,18 @@ S8. Any local size switch (\footnotesize, \small, etc.) MUST restore \normalsize
 
 NOTATION RULES:
 N1. Overdot derivatives: \dot{x}, \ddot{x}
-N2. Middle dot decimal: \cdot  (0\cdot38 → 0·38)
+N2. Middle dot decimal: keep the centered dot, but wrap it in math mode inside prose (e.g. 0$\cdot$38 or $0\cdot38$)
 N3. Imaginary unit ι: \iota
-N4. Footnote symbols: \footnotemark[1] etc. with [symbol*]{footmisc}
+N4. Footnote symbols: use numeric indices with footmisc, e.g. \footnotemark[1], never \footnotemark[*]
 
 REQUIRED PREAMBLE (always use exactly):
 \documentclass[10pt]{article}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-\usepackage{amsmath,amssymb}
+\usepackage{amsmath,amssymb,graphicx}
 \usepackage{microtype,multicol,geometry,fancyhdr}
 \usepackage[symbol*]{footmisc}
-\usepackage{lettrine,array,booktabs,setspace}
+\usepackage{lettrine,array,booktabs,setspace,textcomp,wrapfig}
 \geometry{top=2.5cm,bottom=2.5cm,left=2.8cm,right=2.8cm,headheight=14pt}"""
 
 STEP2_USR = r"""STRUCTURAL ANALYSIS JSON:
@@ -140,26 +140,7 @@ FAILED SOURCE:
 PDFLATEX ERROR LOG:
 {error_log}"""
 
-# ── STEP 5: Glossary Construction ───────────────────────────────────────────
-
-STEP5_SYS = (
-    "You are a specialist in 19th-century physics and mathematics terminology. "
-    "Extract a bilingual Korean-English glossary from the provided LaTeX source."
-)
-
-STEP5_USR = r"""From the LaTeX source below, extract all significant technical terms, proper nouns, and domain vocabulary. Return a JSON array only (no fences):
-
-[{{"english": "...", "korean": "...", "transliteration": "<or null>", "context_note": "<or null>"}}]
-
-Rules:
-- Use established Korean physics/math terminology.
-- Proper nouns (names, journals): keep English, add Korean transliteration.
-- On first occurrence in translation, format as: 한국어(English)
-
-LATEX SOURCE:
-{digitalized_latex_source}"""
-
-# ── STEP 6: Korean Translation ──────────────────────────────────────────────
+# ── Korean Translation ───────────────────────────────────────────────────────
 
 STEP6_SYS = r"""You are a professional academic translator specializing in 19th-century physics. Translate historical academic papers to Korean with complete structural and mathematical fidelity.
 
@@ -170,16 +151,18 @@ NEVER TRANSLATE (preserve exactly):
 - All structural LaTeX commands
 
 TRANSLATE:
-- All body text → formal academic Korean (합쇼체)
+- All body text → plain declarative academic Korean (한다체 / 반말체), never 합쇼체
 - Titles → Korean with original English as subtitle
 - Section headers, footnote text, running headers
 - Preserve original typography intent, including local font-size changes and their scope boundaries.
 - Never allow local size commands (e.g., \footnotesize) to leak into subsequent body paragraphs.
+- Preserve package support required by inherited commands such as \scalebox, \resizebox, and \includegraphics.
+- Keep the prose tone consistent throughout with sentence endings such as 한다 / 이다 / 보자 when appropriate.
+- Never use polite endings such as 합니다 / 입니다 / 하십시오.
 
 TERMINOLOGY:
 - First occurrence: 한국어(English) e.g. 이온(ion)
 - After first: Korean only
-- Use provided glossary — do not deviate
 - No Korean equivalent: keep English + [역주: ...]
 
 PREAMBLE CHANGES FOR KOREAN:
@@ -190,10 +173,7 @@ PREAMBLE CHANGES FOR KOREAN:
   % 원제: [original title] | 저자: [author] | 번역일: [date]
   % 이 문서는 원본 논문의 한국어 번역본입니다. 모든 수식은 원문 그대로입니다."""
 
-STEP6_USR = r"""GLOSSARY:
-{glossary_json}
-
-LATEX SOURCE TO TRANSLATE:
+STEP6_USR = r"""LATEX SOURCE TO TRANSLATE:
 {digitalized_latex_source}
 
 Respond in EXACTLY this format:
@@ -204,13 +184,9 @@ Respond in EXACTLY this format:
 
 %%% TRANSLATION_NOTES %%%
 [Significant decisions: ORIGINAL | TRANSLATION | RATIONALE]
-%%% END_TRANSLATION_NOTES %%%
+%%% END_TRANSLATION_NOTES %%%"""
 
-%%% GLOSSARY_UPDATES %%%
-[New terms as JSON array: {{"english":...,"korean":...,"context_note":...}}]
-%%% END_GLOSSARY_UPDATES %%%"""
-
-# ── STEP 7: Korean xelatex Fix Loop ─────────────────────────────────────────
+# ── Korean xelatex Fix Loop ──────────────────────────────────────────────────
 
 STEP7_SYS = r"""You are a LaTeX and Korean typography debugger. Fix ONLY xelatex compilation errors. Do NOT change any Korean text or math content.
 
@@ -218,9 +194,11 @@ Common xelatex+kotex issues to check:
 - \usepackage{kotex} must be present
 - \setmainfont{...} must reference an installed CJK font
 - Remove \usepackage[T1]{fontenc} and \usepackage[utf8]{inputenc}
+- Ensure \usepackage{graphicx} is present when \scalebox, \resizebox, \rotatebox, or \includegraphics are used
 - Korean in math mode must use \text{한글}
 - Ensure typography scope correctness: local \footnotesize/\small blocks must be followed by \normalsize.
 - Preserve historical size contrast while preventing size leakage into main text.
+- Preserve Korean prose in plain declarative academic style (한다체 / 반말체); do not introduce 합쇼체 endings.
 
 Return corrected source wrapped as:
 %%% CORRECTED_LATEX %%%

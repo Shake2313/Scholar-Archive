@@ -1,8 +1,11 @@
 __pycache__/
 *.pyc
+build/
 .env
 output/
 test_output/
+tests_tmp/
+ScholarArchive.exe
 glossary.db
 *.log
 *_error.log

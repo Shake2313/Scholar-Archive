@@ -6,6 +6,7 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -64,7 +65,6 @@ def _block_none_safety_settings():
 
 def _find_poppler_path() -> str | None:
     """Auto-detect poppler bin directory on Windows."""
-    import shutil
     if shutil.which("pdftoppm"):
         return None  # already on PATH
     candidates = [
@@ -80,12 +80,130 @@ def _find_poppler_path() -> str | None:
 
 def _ensure_latex_on_path():
     """Add MiKTeX to PATH if not already there."""
-    import shutil
     if shutil.which("pdflatex"):
         return
     miktex_bin = os.path.expanduser("~/AppData/Local/Programs/MiKTeX/miktex/bin/x64")
     if os.path.isdir(miktex_bin):
         os.environ["PATH"] = miktex_bin + os.pathsep + os.environ.get("PATH", "")
+
+
+def _check_genai_prereqs() -> dict:
+    key_names = (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_GEMINI_API_KEY",
+    )
+    for key_name in key_names:
+        if os.environ.get(key_name):
+            return {
+                "name": "genai",
+                "status": "ok",
+                "message": f"Using credentials from {key_name}.",
+            }
+
+    vertex_hints = [
+        name
+        for name in (
+            "GOOGLE_GENAI_USE_VERTEXAI",
+            "GOOGLE_CLOUD_PROJECT",
+            "GOOGLE_CLOUD_LOCATION",
+            "GCP_PROJECT",
+        )
+        if os.environ.get(name)
+    ]
+    if vertex_hints:
+        return {
+            "name": "genai",
+            "status": "warn",
+            "message": (
+                "No Gemini API key found; relying on Google Cloud/Vertex-style ambient "
+                f"configuration ({', '.join(vertex_hints)})."
+            ),
+        }
+
+    return {
+        "name": "genai",
+        "status": "warn",
+        "message": (
+            "No explicit Gemini credentials detected. Model calls may fail unless ambient "
+            "Google credentials are configured."
+        ),
+    }
+
+
+def _check_pdf_prereqs() -> dict:
+    fitz_ok = False
+    pdf2image_ok = False
+    try:
+        import fitz  # noqa: F401
+        fitz_ok = True
+    except Exception:
+        pass
+
+    try:
+        import pdf2image  # noqa: F401
+        pdf2image_ok = True
+    except Exception:
+        pass
+
+    poppler_ready = bool(shutil.which("pdftoppm") or _find_poppler_path())
+    if fitz_ok:
+        return {
+            "name": "pdf",
+            "status": "ok",
+            "message": "PyMuPDF available for PDF page counting and rendering fallback.",
+        }
+    if pdf2image_ok and poppler_ready:
+        return {
+            "name": "pdf",
+            "status": "ok",
+            "message": "pdf2image available with Poppler.",
+        }
+    return {
+        "name": "pdf",
+        "status": "error",
+        "message": (
+            "No working PDF rendering backend found. Install PyMuPDF, or install "
+            "pdf2image with Poppler/pdftoppm on PATH."
+        ),
+    }
+
+
+def _check_latex_prereqs() -> dict:
+    _ensure_latex_on_path()
+    pdflatex = shutil.which("pdflatex")
+    xelatex = shutil.which("xelatex")
+    missing = []
+    if not pdflatex:
+        missing.append("pdflatex")
+    if not xelatex:
+        missing.append("xelatex")
+    if missing:
+        return {
+            "name": "latex",
+            "status": "error",
+            "message": (
+                "Missing required LaTeX compiler(s): "
+                + ", ".join(missing)
+                + ". Install MiKTeX/TeX Live and ensure they are on PATH."
+            ),
+        }
+    return {
+        "name": "latex",
+        "status": "ok",
+        "message": "pdflatex and xelatex detected.",
+    }
+
+
+def run_preflight_checks() -> dict:
+    """Collect lightweight environment checks before long pipeline work starts."""
+    checks = [
+        _check_genai_prereqs(),
+        _check_pdf_prereqs(),
+        _check_latex_prereqs(),
+    ]
+    ok = not any(check["status"] == "error" for check in checks)
+    return {"ok": ok, "checks": checks}
 
 
 def get_pdf_page_count(pdf_path: str) -> int:
@@ -287,6 +405,85 @@ def normalize_latex_source(text: str) -> str:
     return src
 
 
+_FOOTNOTE_SYMBOL_INDEX = {
+    "*": "1",
+    "†": "2",
+    "‡": "3",
+    "§": "4",
+    r"\dagger": "2",
+    r"\ddagger": "3",
+    r"\S": "4",
+}
+
+
+def _insert_before_document(source: str, snippet: str) -> str:
+    """Insert a preamble snippet once, immediately before \\begin{document}."""
+    if snippet in source:
+        return source
+    if "\\begin{document}" in source:
+        return source.replace("\\begin{document}", f"{snippet}\n\\begin{{document}}", 1)
+    return f"{source.rstrip()}\n{snippet}\n"
+
+
+def _normalize_symbolic_footnotes(source: str) -> str:
+    """Replace symbolic footnote optional args with numeric indices for footmisc."""
+    pattern = re.compile(
+        r"\\(footnote|footnotemark|footnotetext)\s*\[(\*|†|‡|§|\\dagger|\\ddagger|\\S)\]"
+    )
+
+    def repl(match: re.Match[str]) -> str:
+        command = match.group(1)
+        symbol = match.group(2)
+        return f"\\{command}[{_FOOTNOTE_SYMBOL_INDEX[symbol]}]"
+
+    return pattern.sub(repl, source)
+
+
+def _normalize_decimal_cdots_in_text(source: str) -> str:
+    """Wrap decimal middle dots in math mode when models emit them in text."""
+    return re.sub(r"(?<!\$)(\d)\\cdot(?=\d)", r"\1$\\cdot$", source)
+
+
+def _ensure_graphicx_for_box_commands(source: str) -> str:
+    """Load graphicx when scaling or image commands are present."""
+    if "\\usepackage{graphicx}" in source:
+        return source
+    if not re.search(r"\\(?:includegraphics|scalebox|resizebox|rotatebox|reflectbox)\b", source):
+        return source
+    return _insert_before_document(source, "\\usepackage{graphicx}")
+
+
+def _ensure_wrapfig_for_wrapped_floats(source: str) -> str:
+    """Load wrapfig when wrapfigure or wraptable environments are present."""
+    if "\\usepackage{wrapfig}" in source:
+        return source
+    if "\\begin{wrapfigure}" not in source and "\\begin{wraptable}" not in source:
+        return source
+    return _insert_before_document(source, "\\usepackage{wrapfig}")
+
+
+def _ensure_pdflatex_unicode_support(source: str) -> str:
+    """Inject minimal Unicode declarations needed for historical glyphs under pdfLaTeX."""
+    if "ſ" not in source:
+        return source
+    source = _insert_before_document(source, "\\usepackage{textcomp}")
+    source = _insert_before_document(source, "\\DeclareTextSymbol{\\textlongs}{TS1}{116}")
+    source = _insert_before_document(source, "\\DeclareTextSymbolDefault{\\textlongs}{TS1}")
+    return _insert_before_document(source, "\\DeclareUnicodeCharacter{017F}{\\textlongs}")
+
+
+def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
+    """Apply deterministic source fixes that preserve content but improve compilability."""
+    prepared = normalize_latex_source(source)
+    prepared = _normalize_symbolic_footnotes(prepared)
+    prepared = _normalize_decimal_cdots_in_text(prepared)
+    prepared = _ensure_graphicx_for_box_commands(prepared)
+    prepared = _ensure_wrapfig_for_wrapped_floats(prepared)
+    if compiler == "pdflatex":
+        prepared = _ensure_pdflatex_unicode_support(prepared)
+    return prepared
+
+
 def _looks_like_latex_document(source: str) -> bool:
     src = source.strip()
     return "\\documentclass" in src or "\\begin{document}" in src
@@ -311,6 +508,9 @@ def _is_plausible_fix(old_source: str, new_source: str) -> bool:
 
 def _apply_common_compile_fix(source: str, error_log: str, compiler: str) -> str | None:
     """Apply deterministic fixes for common compiler/runtime issues."""
+    normalized = prepare_latex_for_compile(source, compiler)
+    if normalized != source:
+        return normalized
     if (
         compiler == "pdflatex"
         and "font expansion" in error_log.lower()
@@ -368,6 +568,7 @@ def compile_latex(
     _ensure_latex_on_path()
     os.makedirs(output_dir, exist_ok=True)
     tex_path = os.path.join(output_dir, f"{filename}.tex")
+    source = prepare_latex_for_compile(source, compiler)
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(source)
 
@@ -413,7 +614,7 @@ def auto_fix_loop(
     STEP 3/7: Compile LaTeX, and if it fails, ask Gemini to fix errors.
     Returns (success, final_source, pdf_path).
     """
-    current_source = normalize_latex_source(source)
+    current_source = prepare_latex_for_compile(source, compiler)
 
     for attempt in range(1, max_attempts + 1):
         print(f"  [COMPILE] Attempt {attempt}/{max_attempts} ({compiler})...")
@@ -439,7 +640,7 @@ def auto_fix_loop(
         deterministic = _apply_common_compile_fix(current_source, error_log, compiler)
         if deterministic:
             print("  [COMPILE] Applied deterministic fix and retrying...")
-            current_source = deterministic
+            current_source = prepare_latex_for_compile(deterministic, compiler)
             continue
 
         print(f"  [COMPILE] Failed attempt {attempt}. Requesting fix...")
@@ -457,7 +658,7 @@ def auto_fix_loop(
         fix_response = call_text(fix_system_prompt, user_prompt)
         corrected = extract_block(fix_response, "CORRECTED_LATEX")
         if corrected:
-            normalized = normalize_latex_source(corrected)
+            normalized = prepare_latex_for_compile(corrected, compiler)
             if _looks_like_latex_document(normalized):
                 if _is_plausible_fix(current_source, normalized):
                     current_source = normalized
@@ -511,15 +712,21 @@ def finalize_report(
     num_pages: int,
     digitalized_ok: bool,
     korean_ok: bool,
-    glossary_count: int,
     output_dir: str,
-    glossary_db_path: str | None = None,
+    successful_pages: int | None = None,
+    failed_pages: list[int] | None = None,
 ) -> str:
-    """STEP 8: Generate quality report JSON."""
+    """Generate quality report JSON."""
+    failed_pages = failed_pages or []
     report = {
         "paper_name": name,
         "date": datetime.now().isoformat(),
         "total_pages": num_pages,
+        "transcription": {
+            "successful_pages": successful_pages if successful_pages is not None else num_pages,
+            "failed_pages": failed_pages,
+            "partial_output": bool(failed_pages),
+        },
         "digitalized_pdf": {
             "compiled": digitalized_ok,
             "file": f"{name}_digitalized.pdf" if digitalized_ok else None,
@@ -528,14 +735,9 @@ def finalize_report(
             "compiled": korean_ok,
             "file": f"{name}_Korean.pdf" if korean_ok else None,
         },
-        "glossary": {
-            "term_count": glossary_count,
-            "source": "db",
-            "db_path": glossary_db_path,
-        },
     }
     report_path = os.path.join(output_dir, f"{name}_quality_report.json")
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2)
-    print(f"  [STEP 8] Quality report saved: {report_path}")
+    print(f"  [REPORT] Quality report saved: {report_path}")
     return report_path

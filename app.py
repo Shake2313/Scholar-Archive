@@ -16,7 +16,6 @@ from datetime import datetime
 
 import streamlit as st
 
-from glossary_db import get_db_path, init_db, fetch_terms_for_paper
 from steps import compile_latex
 
 # ── 페이지 설정 ─────────────────────────────────────────────────
@@ -30,6 +29,10 @@ for key, default in {
     "pipeline_error": None,
     "output_dir": None,
     "pipeline_event_queue": None,
+    "author_input": "",
+    "publication_year_input": "",
+    "death_year_input": "",
+    "rights_meta_source": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -59,6 +62,54 @@ def read_json(path: Path):
         return json.load(f)
 
 
+def find_pipeline_state(output_path: Path):
+    state_files = sorted(output_path.glob("*_pipeline_state.json"))
+    if not state_files:
+        return None
+    return read_json(state_files[0])
+
+
+def read_rights_metadata(output_path: Path):
+    metadata = {
+        "author": "",
+        "publication_year": "",
+        "death_year": "",
+    }
+    rights_files = sorted(output_path.glob("*_rights_check.json"))
+    if rights_files:
+        data = read_json(rights_files[0])
+        metadata["author"] = str(data.get("author") or "")
+        metadata["publication_year"] = (
+            str(data.get("publication_year"))
+            if data.get("publication_year") is not None
+            else ""
+        )
+        metadata["death_year"] = (
+            str(data.get("death_year"))
+            if data.get("death_year") is not None
+            else ""
+        )
+    state = find_pipeline_state(output_path)
+    if state:
+        if not metadata["author"]:
+            metadata["author"] = str(state.get("author") or "")
+        if not metadata["publication_year"] and state.get("publication_year") is not None:
+            metadata["publication_year"] = str(state.get("publication_year"))
+        if not metadata["death_year"] and state.get("death_year") is not None:
+            metadata["death_year"] = str(state.get("death_year"))
+    return metadata
+
+
+def apply_rights_metadata(source_key: str, metadata: dict | None = None):
+    if st.session_state.get("rights_meta_source") == source_key:
+        return
+    metadata = metadata or {}
+    st.session_state["author_input"] = str(metadata.get("author") or "")
+    st.session_state["publication_year_input"] = str(metadata.get("publication_year") or "")
+    st.session_state["death_year_input"] = str(metadata.get("death_year") or "")
+    st.session_state["rights_meta_source"] = source_key
+
+
 def pdf_iframe(path: Path):
     data = path.read_bytes()
     b64 = base64.b64encode(data).decode()
@@ -76,24 +127,73 @@ def download_btn(path: Path, label: str):
 _drain_pipeline_events()
 
 
-def _run_pipeline_thread(
-    pdf_bytes: bytes,
+def _start_pipeline_run(
     paper_name: str,
     output_dir: str,
-    pages: str | None,
-    author: str | None,
-    publication_year: int | None,
-    death_year: int | None,
     event_queue,
+    pdf_bytes: bytes | None = None,
+    input_pdf_path: str | None = None,
+    pages: str | None = None,
+    author: str | None = None,
+    publication_year: int | None = None,
+    death_year: int | None = None,
+    retry_pages: str | None = None,
+    workers: int = 4,
+    translation_chunk_pages: int = 4,
+):
+    thread = threading.Thread(
+        target=_run_pipeline_thread,
+        kwargs={
+            "paper_name": paper_name,
+            "output_dir": output_dir,
+            "event_queue": event_queue,
+            "pdf_bytes": pdf_bytes,
+            "input_pdf_path": input_pdf_path,
+            "pages": pages,
+            "author": author,
+            "publication_year": publication_year,
+            "death_year": death_year,
+            "retry_pages": retry_pages,
+            "workers": workers,
+            "translation_chunk_pages": translation_chunk_pages,
+        },
+        daemon=True,
+    )
+    thread.start()
+
+
+def _run_pipeline_thread(
+    paper_name: str,
+    output_dir: str,
+    event_queue,
+    pdf_bytes: bytes | None = None,
+    input_pdf_path: str | None = None,
+    pages: str | None = None,
+    author: str | None = None,
+    publication_year: int | None = None,
+    death_year: int | None = None,
+    retry_pages: str | None = None,
+    workers: int = 4,
+    translation_chunk_pages: int = 4,
 ):
     """파이프라인을 별도 스레드에서 실행하며 로그를 session_state에 기록."""
     import io
     from contextlib import redirect_stdout, redirect_stderr
 
     # PDF를 임시 파일로 저장
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-    tmp.write(pdf_bytes)
-    tmp.close()
+    tmp_path = None
+    input_path = input_pdf_path
+    if pdf_bytes is not None:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        tmp.write(pdf_bytes)
+        tmp.close()
+        tmp_path = tmp.name
+        input_path = tmp_path
+
+    if not input_path:
+        event_queue.put(("error", "No input PDF available for this run."))
+        event_queue.put(("done", None))
+        return
 
     log_buf = io.StringIO()
     event_queue.put(("log", "[THREAD] Pipeline thread started"))
@@ -122,20 +222,24 @@ def _run_pipeline_thread(
         capture = LogCapture(log_buf)
         with redirect_stdout(capture), redirect_stderr(capture):
             run_pipeline(
-                tmp.name,
+                input_path,
                 paper_name,
                 output_dir,
                 pages,
                 author=author,
                 publication_year=publication_year,
                 death_year=death_year,
+                workers=workers,
+                translation_chunk_pages=translation_chunk_pages,
+                retry_pages=retry_pages,
             )
 
         event_queue.put(("error", None))
     except Exception as e:
         event_queue.put(("error", str(e)))
     finally:
-        os.unlink(tmp.name)
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         event_queue.put(("done", None))
 
 
@@ -147,6 +251,12 @@ with st.sidebar:
         type=["pdf"],
         accept_multiple_files=False,
     )
+
+    if uploaded is not None:
+        apply_rights_metadata(
+            f"upload:{uploaded.name}:{getattr(uploaded, 'size', '')}",
+            {},
+        )
 
     paper_name = st.text_input(
         "논문 이름 (출력 파일명에 사용)",
@@ -165,9 +275,17 @@ with st.sidebar:
     )
 
     st.caption("Rights Check Metadata (optional)")
-    author_input = st.text_input("Author", value="Emmy Noether")
-    publication_year_input = st.text_input("Publication year", value="1918")
-    death_year_input = st.text_input("Author death year", value="1935")
+    author_input = st.text_input("Author", key="author_input", placeholder="e.g. Emmy Noether")
+    publication_year_input = st.text_input(
+        "Publication year",
+        key="publication_year_input",
+        placeholder="e.g. 1918",
+    )
+    death_year_input = st.text_input(
+        "Author death year",
+        key="death_year_input",
+        placeholder="e.g. 1935",
+    )
     st.divider()
 
     col1, col2 = st.columns(2)
@@ -186,6 +304,10 @@ with st.sidebar:
             st.session_state["pipeline_error"] = None
             st.session_state["output_dir"] = None
             st.session_state["pipeline_event_queue"] = None
+            st.session_state["author_input"] = ""
+            st.session_state["publication_year_input"] = ""
+            st.session_state["death_year_input"] = ""
+            st.session_state["rights_meta_source"] = None
             st.rerun()
 
     # 파이프라인 실행 트리거
@@ -210,21 +332,16 @@ with st.sidebar:
         event_queue = queue.Queue()
         st.session_state["pipeline_event_queue"] = event_queue
 
-        thread = threading.Thread(
-            target=_run_pipeline_thread,
-            args=(
-                pdf_bytes,
-                paper_name,
-                output_dir_input,
-                pages,
-                author,
-                publication_year,
-                death_year,
-                event_queue,
-            ),
-            daemon=True,
+        _start_pipeline_run(
+            paper_name=paper_name,
+            output_dir=output_dir_input,
+            event_queue=event_queue,
+            pdf_bytes=pdf_bytes,
+            pages=pages,
+            author=author,
+            publication_year=publication_year,
+            death_year=death_year,
         )
-        thread.start()
         st.rerun()
 
     # 진행 상태 표시
@@ -251,6 +368,10 @@ with st.sidebar:
             st.session_state["output_dir"] = existing_dir
             st.session_state["pipeline_done"] = True
             st.session_state["pipeline_error"] = None
+            apply_rights_metadata(
+                f"output:{Path(existing_dir).resolve()}",
+                read_rights_metadata(Path(existing_dir)),
+            )
             st.rerun()
         else:
             st.error("폴더를 찾을 수 없습니다.")
@@ -275,6 +396,19 @@ if not output_dir or not Path(output_dir).is_dir():
     st.stop()
 
 output_path = Path(output_dir)
+if uploaded is None:
+    apply_rights_metadata(
+        f"output:{output_path.resolve()}",
+        read_rights_metadata(output_path),
+    )
+pipeline_state = find_pipeline_state(output_path)
+failed_pages = []
+if pipeline_state:
+    failed_pages = [
+        int(page)
+        for page in pipeline_state.get("failed_pages", [])
+        if isinstance(page, int) or isinstance(page, float) or str(page).isdigit()
+    ]
 
 # ── 품질 보고서 요약 ────────────────────────────────────────────
 report_files = sorted(output_path.glob("*_quality_report.json"))
@@ -283,7 +417,7 @@ if report_files:
     report = read_json(report_files[0])
     pname = report.get("paper_name", output_path.name)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("논문", pname)
     c2.metric("페이지", report.get("total_pages", "?"))
     dig_status = "OK" if report.get("digitalized_pdf", {}).get("compiled") else "FAIL"
@@ -296,11 +430,64 @@ if report_files:
         kor_status = "FAIL"
     c3.metric("디지털화 PDF", dig_status)
     c4.metric("한국어 PDF", kor_status)
+    report_failed_pages = report.get("transcription", {}).get("failed_pages", [])
+    if not failed_pages:
+        failed_pages = report_failed_pages
+    c5.metric("?ㅽ뙣 ?섏씠吏", len(failed_pages))
     # Fallback: if pipeline log missed the "done" event, mark complete when report exists.
     if st.session_state.get("pipeline_running") and not st.session_state.get("pipeline_error"):
         st.session_state["pipeline_running"] = False
         st.session_state["pipeline_done"] = True
         st.session_state["pipeline_event_queue"] = None
+
+if failed_pages:
+    failed_pages = sorted({int(page) for page in failed_pages})
+    st.warning(
+        "필사에 실패한 페이지가 있어 현재 결과는 부분 완성본입니다. "
+        f"실패 페이지: {failed_pages}"
+    )
+    retry_col, retry_info_col = st.columns([1, 2])
+    with retry_col:
+        retry_clicked = st.button(
+            "실패한 페이지 재시도",
+            type="primary",
+            disabled=st.session_state["pipeline_running"],
+            width="stretch",
+        )
+    with retry_info_col:
+        st.caption("이미 성공한 페이지는 재사용하고, 실패한 페이지와 이후 결과물만 다시 갱신합니다.")
+
+    if retry_clicked:
+        if not pipeline_state:
+            st.error("재시도에 필요한 상태 파일을 찾을 수 없습니다.")
+        else:
+            source_pdf = pipeline_state.get("source_pdf")
+            if not source_pdf or not Path(source_pdf).is_file():
+                st.error("원본 PDF를 찾을 수 없습니다. 다시 업로드해서 실행하세요.")
+            else:
+                st.session_state["pipeline_running"] = True
+                st.session_state["pipeline_done"] = False
+                st.session_state["pipeline_log"] = []
+                st.session_state["pipeline_error"] = None
+                st.session_state["output_dir"] = str(output_path)
+                event_queue = queue.Queue()
+                st.session_state["pipeline_event_queue"] = event_queue
+                _start_pipeline_run(
+                    paper_name=pipeline_state.get("paper_name", output_path.name),
+                    output_dir=str(output_path),
+                    event_queue=event_queue,
+                    input_pdf_path=source_pdf,
+                    pages=pipeline_state.get("pages_arg"),
+                    author=pipeline_state.get("author"),
+                    publication_year=pipeline_state.get("publication_year"),
+                    death_year=pipeline_state.get("death_year"),
+                    retry_pages=",".join(str(page) for page in failed_pages),
+                    workers=int(pipeline_state.get("workers", 4) or 4),
+                    translation_chunk_pages=int(
+                        pipeline_state.get("translation_chunk_pages", 4) or 4
+                    ),
+                )
+                st.rerun()
 
 st.divider()
 
@@ -309,7 +496,6 @@ tabs = st.tabs([
     "원본 이미지",
     "디지털화 PDF",
     "한국어 PDF",
-    "용어집",
     "품질 보고서",
     "LaTeX 소스",
     "노트",
@@ -348,31 +534,16 @@ with tabs[2]:
     else:
         st.info("한국어 PDF 파일이 없습니다.")
 
-# ── 4. 용어집 ───────────────────────────────────────────────────
+# ── 4. 품질 보고서 ──────────────────────────────────────────────
 with tabs[3]:
-    init_db(get_db_path())
-    paper_name = None
-    if report:
-        paper_name = report.get("paper_name")
-    if not paper_name:
-        paper_name = output_path.name
-    glossary = fetch_terms_for_paper(get_db_path(), paper_name)
-    if glossary:
-        st.dataframe(glossary, width="stretch", height=500)
-        st.caption(f"총 {len(glossary)}개 용어 (DB)")
-    else:
-        st.info("DB에 용어집이 없습니다.")
-
-# ── 5. 품질 보고서 ──────────────────────────────────────────────
-with tabs[4]:
     if report:
         st.json(report)
         download_btn(report_files[0], "품질 보고서 다운로드")
     else:
         st.info("품질 보고서 파일이 없습니다.")
 
-# ── 6. LaTeX 소스 ───────────────────────────────────────────────
-with tabs[5]:
+# ── 5. LaTeX 소스 ───────────────────────────────────────────────
+with tabs[4]:
     tex_files = sorted(output_path.glob("*.tex"))
     if tex_files:
         selected = st.selectbox("?? ??", tex_files, format_func=lambda p: p.name)
@@ -434,7 +605,7 @@ with tabs[5]:
                 st.info("PDF? ????. ???? ?? ?????.")
     else:
         st.info("LaTeX ??? ????.")
-with tabs[6]:
+with tabs[5]:
     note_files = sorted(output_path.glob("*_notes.txt"))
     if note_files:
         for nf in note_files:
