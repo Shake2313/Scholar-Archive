@@ -13,3 +13,4 @@ test_paper.pdf
 _miktex_download.html
 frontend/node_modules/
 frontend/.next/
+.codex_supabase_exec_result.txt
