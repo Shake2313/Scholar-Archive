@@ -1,69 +1,85 @@
 # Scholar Archive
 
-옛 논문 PDF를 LaTeX 기반 디지털 원문과 한국어 번역본으로 변환하는 파이프라인입니다.
+Scholar Archive는 단순 번역 프로그램이 아니다. 스캔된 고문헌 PDF를 디지털 원문과 한국어 번역본으로 복원하고, 메타데이터와 함께 데이터베이스에 게시한 뒤, 웹에서 열람 가능한 공개 아카이브로 운영하기 위한 프로젝트다.
+
+## 목표
+
+- 옛 논문과 문헌을 LaTeX 기반 디지털 원문으로 최대한 충실하게 복원한다.
+- 한국어 번역본, 메타데이터, 품질 리포트를 함께 보존한다.
+- 결과물을 로컬 산출물로 끝내지 않고 Supabase에 게시한다.
+- Vercel 웹에서 연대별, 저자별, 문서별로 탐색 가능한 디지털 도서관을 만든다.
+
+즉 이 프로젝트의 목적은 "PDF를 번역해서 끝내는 도구"가 아니라 "축적되고 공개되는 연구용 디지털 도서관"이다.
 
 ## 핵심 원칙
 
-이 프로젝트의 최우선 목표는 옛 논문의 형식, 문법, 표기, 수식, 문체, 개념 표현을 가능한 한 그대로 고증하는 것입니다.
+- 원문의 철자, 문체, 표기, 구두점은 가능한 한 보존한다.
+- AI가 내용을 현대적으로 정리하거나 요약하는 방향으로 개입하지 않는다.
+- 결과물은 읽기 편의보다 historical reproduction과 faithful transcription을 우선한다.
+- 번역과 메타데이터 추론은 원문 보존을 보조하는 수단이지, 원문을 대체하는 결과물이 아니다.
 
-- 원문에 있는 오래된 문법, 철자, 용어, 개념 표현을 임의로 현대화하지 않습니다.
-- 19세기 스타일의 문장, 지금 기준에서 부정확해 보이는 개념, 시대 특유의 표기법도 원문 일부로 간주합니다.
-- AI가 내용을 보고 "틀렸다"거나 "낡았다"고 판단해 멋대로 수정하는 것은 금지합니다.
-- 목표는 교정이나 현대화가 아니라 faithful transcription과 historical reproduction입니다.
-- 애매한 부분이 있으면 조용히 고치지 말고 표시하거나 검토 대상으로 남기는 쪽이 맞습니다.
+## 현재 구성
 
-즉, 이 프로젝트는 옛 논문을 현대 독자에게 맞게 다듬는 도구가 아니라, 원문을 최대한 손대지 않고 디지털 형태로 복원하는 도구입니다.
+- `pipeline.py`
+  - PDF 처리, 페이지 전사, 번역, 컴파일, 리포트 생성, 게시까지 담당하는 메인 파이프라인
+- `steps.py`
+  - PDF 렌더링, 모델 호출, LaTeX 보정, 컴파일 같은 공용 실행 로직
+- `publish.py`
+  - 게시 번들 생성, Supabase Storage/DB 업로드, 기존 산출물 재게시
+- `app.py`
+  - 로컬 운영용 Streamlit UI
+- `frontend/`
+  - Vercel 배포용 Next.js 웹 앱
+- `supabase/schema.sql`
+  - 공개 읽기 아카이브용 테이블, 버킷, RLS 정책
+- `tests/test_helpers.py`
+  - 핵심 helper 회귀 테스트
 
-## 개요
+## 파이프라인 결과물
 
-- 입력: 스캔된 논문 PDF
-- 출력: 페이지 이미지, 디지털화된 LaTeX/PDF, 한국어 LaTeX/PDF, 번역 노트, 품질 리포트, 권리 체크 로그
-- 실행 방식: CLI(`pipeline.py`) 또는 Streamlit UI(`app.py`)
+- 원본 PDF 복사본
+- 페이지 이미지
+- 디지털화된 LaTeX / PDF
+- 한국어 LaTeX / PDF
+- 전사 노트 / 번역 노트
+- 품질 리포트
+- 권리 체크 JSON
+- AI 보강 메타데이터 JSON
+- 게시 리포트 JSON
 
-## 주요 기능
+## 게시 및 웹 구조
 
-- PDF를 페이지 이미지로 변환
-- 페이지 구조 분석과 LaTeX 전사
-- LaTeX 병합 및 `pdflatex`/`xelatex` 컴파일
-- 컴파일 실패 시 자동 수정 루프 수행
-- 한국어 번역 LaTeX/PDF 생성
-- 품질 리포트와 권리 체크 JSON 생성
+- 저장소
+  - Supabase Postgres: 문서, 저자, 페이지, 자산, 메타데이터 스냅샷
+  - Supabase Storage: PDF, 이미지, TeX, JSON, 노트
+- 공개 웹
+  - 홈
+  - 연대별 분류
+  - 저자별 분류
+  - 문서 상세 페이지
+    - 원문 페이지 이미지
+    - 디지털 원문 텍스트
+    - 한국어 번역 텍스트
+    - PDF 다운로드
 
-## 프로젝트 구조
-
-- `pipeline.py`: 전체 파이프라인 오케스트레이션
-- `steps.py`: PDF 처리, 모델 호출, LaTeX 컴파일, 자동 수정 공용 함수
-- `prompts.py`: 전사/번역/자동 수정 프롬프트 상수
-- `app.py`: Streamlit UI
-- `tests/test_helpers.py`: 순수 helper 회귀 테스트
-
-## 요구 사항
-
-- Python 3.x
-- `pip install -r requirements.txt`
-- LaTeX 컴파일러
-- `pdflatex`
-- `xelatex`
-- Gemini API 키 또는 Vertex/Google Cloud 기반 인증
-- PDF 렌더링 백엔드
-- PyMuPDF 또는 `pdf2image + Poppler`
-
-## 환경 변수
-
-- 모델 인증
-- `GEMINI_API_KEY`
-- 또는 `GOOGLE_API_KEY`
-- 또는 `GOOGLE_GEMINI_API_KEY`
-- 선택 사항
-- `MODEL_NAME`
-- `API_TIMEOUT_SEC`
-
-## 실행
+## 실행 방식
 
 CLI:
 
 ```bash
 python pipeline.py --input paper.pdf --name PaperName --output ./output/PaperName
+```
+
+게시 없이 실행:
+
+```bash
+python pipeline.py --input paper.pdf --name PaperName --output ./output/PaperName --no-publish
+```
+
+기존 산출물 재게시:
+
+```bash
+python publish.py --output-dir ./output/PaperName --name PaperName
 ```
 
 페이지 범위 지정:
@@ -78,55 +94,87 @@ Streamlit UI:
 streamlit run app.py
 ```
 
-또는 Windows에서:
+Frontend 개발 서버:
 
-```bat
-run_streamlit.bat
+```bash
+cd frontend
+npm install
+npm run dev
 ```
+
+## 환경 변수
+
+모델 호출:
+
+- `GEMINI_API_KEY`
+- 또는 `GOOGLE_API_KEY`
+- 또는 `GOOGLE_GEMINI_API_KEY`
+
+게시:
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- 또는 `SUPABASE_SECRET_KEY`
+- 선택 사항: `SUPABASE_STORAGE_BUCKET`
+
+DB 스키마 적용:
+
+- `DATABASE_POOLER_URL`
+- 또는 `SUPABASE_DB_URL`
+- 또는 `DATABASE_URL`
+
+웹 공개 읽기:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+기타:
+
+- `MODEL_NAME`
+- `API_TIMEOUT_SEC`
+
+## 배포 요약
+
+1. `supabase/schema.sql`을 Supabase 프로젝트에 적용한다.
+2. 파이프라인 환경에 `SUPABASE_URL`과 service key를 넣는다.
+3. `frontend/`를 Vercel에 배포한다.
+4. Vercel 환경 변수에 `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`를 넣는다.
+5. 파이프라인이 문서를 처리하면 결과물이 자동 게시되고 웹에서 열람된다.
 
 ## Windows launcher
 
-작업표시줄에 고정해서 프로그램처럼 켜고 싶다면 `ScholarArchive.exe`를 사용할 수 있습니다.
+작업표시줄에서 로컬 운영 UI를 실행하려면 `ScholarArchive.exe`를 사용할 수 있다.
 
-- 이 exe는 완전 독립형 앱이 아니라 Streamlit 실행을 편하게 해주는 launcher입니다.
-- 따라서 프로젝트 폴더와 Python 환경, 패키지 설치, LaTeX 도구는 그대로 필요합니다.
-- `ScholarArchive.exe`는 프로젝트 루트에 두는 것이 가장 안전합니다.
-- Windows에서 exe를 우클릭해서 작업표시줄에 고정하면 됩니다.
+- 이 exe는 전체 앱을 패키징한 것이 아니라 Streamlit 실행용 launcher다.
+- Python 환경, 패키지, LaTeX 도구는 별도로 설치되어 있어야 한다.
 
-빌드 다시 하기:
+빌드:
 
 ```bat
 build_launcher.bat
 ```
 
-직접 명령으로 빌드:
-
-```bash
-python -m PyInstaller --noconfirm --onefile --noconsole --name ScholarArchive --distpath . --workpath build\pyinstaller --specpath build\pyinstaller launcher.py
-```
-
-특정 Python으로 실행하고 싶으면 환경 변수 `SCHOLAR_ARCHIVE_PYTHON`에 인터프리터 경로를 지정할 수 있습니다.
-
-## preflight 체크
-
-파이프라인 시작 시 아래 항목을 먼저 점검합니다.
-
-- 모델 인증 상태
-- PDF 처리 가능 여부
-- `pdflatex`, `xelatex` 사용 가능 여부
-
-치명적인 누락이 있으면 긴 작업을 시작하기 전에 바로 실패합니다.
-
-## 테스트
+## 검증
 
 문법 체크:
 
 ```bash
-python -m py_compile pipeline.py app.py steps.py prompts.py tests/test_helpers.py
+python -m py_compile pipeline.py publish.py app.py steps.py prompts.py tests/test_helpers.py
 ```
 
-helper 테스트:
+테스트:
 
 ```bash
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
+
+웹 빌드:
+
+```bash
+cd frontend
+npm run build
+```
+
+## 다음 참고
+
+현재 작업 우선순위와 완료 이력은 [CODEX_CHECKLIST.md](C:/Users/박수인/Desktop/백업/Coding/Scholar%20Archive/CODEX_CHECKLIST.md)에 정리한다.

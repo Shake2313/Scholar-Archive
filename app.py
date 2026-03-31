@@ -16,6 +16,7 @@ from datetime import datetime
 
 import streamlit as st
 
+from operations import build_operations_summary
 from steps import compile_latex
 
 # ── 페이지 설정 ─────────────────────────────────────────────────
@@ -75,20 +76,49 @@ def read_rights_metadata(output_path: Path):
         "publication_year": "",
         "death_year": "",
     }
-    rights_files = sorted(output_path.glob("*_rights_check.json"))
-    if rights_files:
-        data = read_json(rights_files[0])
-        metadata["author"] = str(data.get("author") or "")
+    metadata_files = sorted(output_path.glob("*_metadata.json"))
+    if metadata_files:
+        data = read_json(metadata_files[0])
+        effective = data.get("effective_metadata", {}) if isinstance(data, dict) else {}
+        rights = data.get("rights_metadata", {}) if isinstance(data, dict) else {}
+        metadata["author"] = str(
+            rights.get("author")
+            or effective.get("author")
+            or ""
+        )
         metadata["publication_year"] = (
-            str(data.get("publication_year"))
-            if data.get("publication_year") is not None
+            str(
+                rights.get("publication_year")
+                if rights.get("publication_year") is not None
+                else effective.get("publication_year")
+            )
+            if (
+                rights.get("publication_year") is not None
+                or effective.get("publication_year") is not None
+            )
             else ""
         )
         metadata["death_year"] = (
-            str(data.get("death_year"))
-            if data.get("death_year") is not None
+            str(
+                rights.get("death_year")
+                if rights.get("death_year") is not None
+                else effective.get("death_year")
+            )
+            if (
+                rights.get("death_year") is not None
+                or effective.get("death_year") is not None
+            )
             else ""
         )
+    rights_files = sorted(output_path.glob("*_rights_check.json"))
+    if rights_files:
+        data = read_json(rights_files[0])
+        if not metadata["author"]:
+            metadata["author"] = str(data.get("author") or "")
+        if not metadata["publication_year"] and data.get("publication_year") is not None:
+            metadata["publication_year"] = str(data.get("publication_year"))
+        if not metadata["death_year"] and data.get("death_year") is not None:
+            metadata["death_year"] = str(data.get("death_year"))
     state = find_pipeline_state(output_path)
     if state:
         if not metadata["author"]:
@@ -380,6 +410,58 @@ with st.sidebar:
 # ── 메인 영역 ───────────────────────────────────────────────────
 st.title("📜 논문 디지털화 & 한국어 번역")
 
+operations_root = Path(__file__).parent / "output"
+operations_summary = build_operations_summary(operations_root)
+
+with st.expander("운영 요약", expanded=True):
+    st.caption(f"스캔 루트: {operations_summary['output_root']}")
+    documents = operations_summary["documents"]
+    if documents:
+        counts = operations_summary["counts"]
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("결과 폴더", counts["total_outputs"])
+        c2.metric("게시 완료", counts["published_outputs"])
+        c3.metric("게시 대기", counts["ready_to_publish_outputs"])
+        c4.metric("게시 실패", counts["publish_failed_outputs"])
+        c5.metric("부분 완성", counts["partial_outputs"])
+        c6.metric("리포트 없음", counts["missing_quality_reports"])
+
+        summary_rows = [
+            {
+                "폴더": item["folder_name"],
+                "제목": item["title"],
+                "페이지": item["total_pages"] or "-",
+                "실패 페이지": ", ".join(str(page) for page in item["failed_pages"]) or "-",
+                "게시": item["publish_status"],
+                "다음 작업": item["next_action"],
+                "최근 갱신": item["updated_at"] or "-",
+            }
+            for item in documents
+        ]
+        st.dataframe(summary_rows, hide_index=True, use_container_width=True)
+
+        doc_labels = {
+            item["path"]: f"{item['folder_name']} [{item['publish_status']}] - {item['next_action']}"
+            for item in documents
+        }
+        selected_output_dir = st.selectbox(
+            "요약에서 결과 폴더 열기",
+            options=list(doc_labels),
+            format_func=lambda value: doc_labels[value],
+            key="summary_output_dir",
+        )
+        if st.button("선택한 결과 폴더 열기", width="stretch"):
+            st.session_state["output_dir"] = selected_output_dir
+            st.session_state["pipeline_done"] = True
+            st.session_state["pipeline_error"] = None
+            apply_rights_metadata(
+                f"output:{Path(selected_output_dir).resolve()}",
+                read_rights_metadata(Path(selected_output_dir)),
+            )
+            st.rerun()
+    else:
+        st.info("output/ 아래에 집계할 결과 폴더가 없습니다.")
+
 # ── 실행 로그 (실행 중이거나 완료 후) ────────────────────────────
 if st.session_state["pipeline_running"] or st.session_state["pipeline_log"]:
     with st.expander("실행 로그", expanded=st.session_state["pipeline_running"]):
@@ -413,6 +495,8 @@ if pipeline_state:
 # ── 품질 보고서 요약 ────────────────────────────────────────────
 report_files = sorted(output_path.glob("*_quality_report.json"))
 report = None
+publish_report_files = sorted(output_path.glob("*_publish_report.json"))
+publish_report = read_json(publish_report_files[0]) if publish_report_files else None
 if report_files:
     report = read_json(report_files[0])
     pname = report.get("paper_name", output_path.name)
@@ -541,6 +625,10 @@ with tabs[3]:
         download_btn(report_files[0], "품질 보고서 다운로드")
     else:
         st.info("품질 보고서 파일이 없습니다.")
+    if publish_report:
+        st.subheader("게시 리포트")
+        st.json(publish_report)
+        download_btn(publish_report_files[0], "게시 리포트 다운로드")
 
 # ── 5. LaTeX 소스 ───────────────────────────────────────────────
 with tabs[4]:

@@ -65,6 +65,72 @@ STEP1_USR = r"""Analyze this scanned historical academic paper page. Output stri
   "transcription_flags": ["<anything needing special LaTeX attention>"]
 }"""
 
+# ── Metadata Inference ───────────────────────────────────────────────────────
+
+METADATA_SYS = r"""You extract bibliographic metadata for historical academic papers from partial evidence.
+
+Rules:
+- Use ONLY the evidence provided in the prompt.
+- Prefer null over guessing.
+- If a field is inferred indirectly, lower confidence accordingly.
+- For death_year, only fill it if the evidence is explicit or the identification is extremely well supported.
+- Return strict JSON only with no fences or commentary."""
+
+METADATA_USR = r"""Infer the paper metadata from the evidence below.
+
+Return EXACTLY this JSON object:
+{
+  "title": "<string or null>",
+  "author": "<string or null>",
+  "publication_year": <integer or null>,
+  "death_year": <integer or null>,
+  "journal_or_book": "<string or null>",
+  "volume": "<string or null>",
+  "issue": "<string or null>",
+  "pages": "<string or null>",
+  "language": "<string or null>",
+  "doi": "<string or null>",
+  "confidence": {
+    "title": "<high|medium|low|none>",
+    "author": "<high|medium|low|none>",
+    "publication_year": "<high|medium|low|none>",
+    "death_year": "<high|medium|low|none>",
+    "journal_or_book": "<high|medium|low|none>",
+    "volume": "<high|medium|low|none>",
+    "issue": "<high|medium|low|none>",
+    "pages": "<high|medium|low|none>",
+    "language": "<high|medium|low|none>",
+    "doi": "<high|medium|low|none>"
+  },
+  "evidence": {
+    "title": "<short evidence string or null>",
+    "author": "<short evidence string or null>",
+    "publication_year": "<short evidence string or null>",
+    "death_year": "<short evidence string or null>",
+    "journal_or_book": "<short evidence string or null>",
+    "volume": "<short evidence string or null>",
+    "issue": "<short evidence string or null>",
+    "pages": "<short evidence string or null>",
+    "language": "<short evidence string or null>",
+    "doi": "<short evidence string or null>"
+  }
+}
+
+Do not copy uncertain OCR noise as metadata.
+
+PAPER NAME HINT:
+{paper_name}
+
+RAW PDF METADATA:
+{raw_pdf_metadata_json}
+
+PAGE 1 STRUCTURE JSON:
+{structure_json}
+
+PAGE 1 LATEX TRANSCRIPTION:
+{first_page_latex}
+"""
+
 # ── STEP 2: LaTeX Transcription ─────────────────────────────────────────────
 
 STEP2_SYS = r"""You are a faithful historical document transcriber with expert LaTeX knowledge.

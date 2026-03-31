@@ -2,5 +2,6 @@ google-genai
 pdf2image
 Pillow
 pymupdf
+psycopg[binary]
 python-dotenv
 streamlit

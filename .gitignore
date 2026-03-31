@@ -11,3 +11,5 @@ glossary.db
 *_error.log
 test_paper.pdf
 _miktex_download.html
+frontend/node_modules/
+frontend/.next/

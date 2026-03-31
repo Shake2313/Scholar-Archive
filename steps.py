@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+from statistics import median
 import subprocess
 import tempfile
 from pathlib import Path
@@ -19,8 +20,34 @@ from prompts import STEP3_SYS, STEP3_USR
 
 # Model to use for all API calls — override via environment variable MODEL_NAME
 DEFAULT_MODEL = os.environ.get("MODEL_NAME", "gemini-3-flash-preview")
+TRANSLATION_MODEL = (
+    os.environ.get("TRANSLATION_MODEL_NAME")
+    or os.environ.get("GEMINI_TRANSLATION_MODEL")
+    or "gemini-3.1-pro-preview"
+)
 API_TIMEOUT_SEC = int(os.environ.get("API_TIMEOUT_SEC", "180"))
+API_RETRY_ATTEMPTS = max(1, int(os.environ.get("API_RETRY_ATTEMPTS", "2")))
 _GENAI_CLIENT: genai.Client | None = None
+
+
+def _request_http_options() -> types.HttpOptions:
+    """Build per-request HTTP options with explicit timeout and bounded retries."""
+    return types.HttpOptions(
+        timeout=API_TIMEOUT_SEC * 1000,
+        retryOptions=types.HttpRetryOptions(
+            attempts=API_RETRY_ATTEMPTS,
+            initialDelay=1.0,
+            maxDelay=5.0,
+            expBase=2.0,
+            jitter=0.2,
+            httpStatusCodes=[429, 500, 502, 503, 504],
+        ),
+    )
+
+
+def _latex_compile_timeout_sec() -> int:
+    """Return the LaTeX compiler timeout in seconds."""
+    return max(30, int(os.environ.get("LATEX_COMPILE_TIMEOUT_SEC", "120")))
 
 
 def _ensure_genai_configured() -> genai.Client:
@@ -216,6 +243,201 @@ def get_pdf_page_count(pdf_path: str) -> int:
     return count
 
 
+def get_pdf_page_sizes(
+    pdf_path: str,
+    page_numbers: list[int] | None = None,
+) -> list[tuple[float, float]]:
+    """Return page sizes in PDF big points (1/72 inch)."""
+    import fitz
+
+    doc = fitz.open(pdf_path)
+    if page_numbers is None:
+        indices = range(doc.page_count)
+    else:
+        indices = [idx for idx in page_numbers if 0 <= idx < doc.page_count]
+
+    sizes = []
+    for idx in indices:
+        rect = doc.load_page(idx).rect
+        sizes.append((float(rect.width), float(rect.height)))
+    doc.close()
+    return sizes
+
+
+def _sample_evenly(items: list[str], max_samples: int = 5) -> list[str]:
+    """Return up to max_samples items spaced across the list."""
+    if len(items) <= max_samples:
+        return items
+    if max_samples <= 1:
+        return [items[0]]
+    last = len(items) - 1
+    indices = sorted({round(i * last / (max_samples - 1)) for i in range(max_samples)})
+    return [items[idx] for idx in indices]
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
+def _estimate_margin_fractions_from_image(image_path: str) -> dict[str, float] | None:
+    """Estimate the dominant content box margins from a scanned page image."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    try:
+        with Image.open(image_path) as img:
+            gray = img.convert("L")
+            gray.thumbnail((600, 800))
+            width, height = gray.size
+            pixels = gray.load()
+    except Exception:
+        return None
+
+    row_threshold = max(6, int(width * 0.02))
+    col_threshold = max(6, int(height * 0.02))
+    dark_threshold = 215
+
+    row_counts: list[int] = []
+    col_counts = [0] * width
+    for y in range(height):
+        row_count = 0
+        for x in range(width):
+            is_dark = pixels[x, y] < dark_threshold
+            if is_dark:
+                row_count += 1
+                col_counts[x] += 1
+        row_counts.append(row_count)
+
+    top = next((idx for idx, count in enumerate(row_counts) if count >= row_threshold), None)
+    left = next((idx for idx, count in enumerate(col_counts) if count >= col_threshold), None)
+    if top is None or left is None:
+        return None
+
+    bottom_offset = next(
+        (idx for idx, count in enumerate(reversed(row_counts)) if count >= row_threshold),
+        None,
+    )
+    right_offset = next(
+        (idx for idx, count in enumerate(reversed(col_counts)) if count >= col_threshold),
+        None,
+    )
+    if bottom_offset is None or right_offset is None:
+        return None
+
+    bottom = height - 1 - bottom_offset
+    right = width - 1 - right_offset
+    return {
+        "left": left / width,
+        "right": (width - right - 1) / width,
+        "top": top / height,
+        "bottom": (height - bottom - 1) / height,
+    }
+
+
+def _format_tex_length(value: float, unit: str = "bp") -> str:
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{text}{unit}"
+
+
+def infer_source_layout_profile(
+    pdf_path: str,
+    image_paths: list[str],
+    page_numbers: list[int] | None = None,
+) -> dict:
+    """Infer a source-faithful page size and margin profile for historical scans."""
+    page_sizes = get_pdf_page_sizes(pdf_path, page_numbers)
+    if not page_sizes:
+        return {}
+
+    width_bp = round(median(width for width, _ in page_sizes), 2)
+    height_bp = round(median(height for _, height in page_sizes), 2)
+    width_in = width_bp / 72.0
+    height_in = height_bp / 72.0
+
+    margin_samples = [
+        sample
+        for sample in (
+            _estimate_margin_fractions_from_image(path) for path in _sample_evenly(image_paths)
+        )
+        if sample
+    ]
+
+    default_fractions = {
+        "left": 0.13,
+        "right": 0.13,
+        "top": 0.09,
+        "bottom": 0.09,
+    }
+    if margin_samples:
+        margin_fractions = {
+            "left": round(
+                _clamp(median(sample["left"] for sample in margin_samples), 0.08, 0.17),
+                4,
+            ),
+            "right": round(
+                _clamp(median(sample["right"] for sample in margin_samples), 0.08, 0.17),
+                4,
+            ),
+            "top": round(
+                _clamp(median(sample["top"] for sample in margin_samples), 0.05, 0.12),
+                4,
+            ),
+            "bottom": round(
+                _clamp(median(sample["bottom"] for sample in margin_samples), 0.05, 0.12),
+                4,
+            ),
+        }
+    else:
+        margin_fractions = default_fractions
+
+    font_size_pt = 10
+    if width_in <= 5.9 and height_in <= 8.6:
+        font_size_pt = 12
+    elif width_in <= 6.4 or height_in <= 9.2:
+        font_size_pt = 11
+
+    margins_bp = {
+        side: round(
+            {
+                "left": width_bp,
+                "right": width_bp,
+                "top": height_bp,
+                "bottom": height_bp,
+            }[side]
+            * fraction,
+            2,
+        )
+        for side, fraction in margin_fractions.items()
+    }
+    geometry_options = ",".join(
+        [
+            f"paperwidth={_format_tex_length(width_bp)}",
+            f"paperheight={_format_tex_length(height_bp)}",
+            f"top={_format_tex_length(margins_bp['top'])}",
+            f"bottom={_format_tex_length(margins_bp['bottom'])}",
+            f"left={_format_tex_length(margins_bp['left'])}",
+            f"right={_format_tex_length(margins_bp['right'])}",
+            "headheight=14pt",
+        ]
+    )
+
+    return {
+        "profile_version": 1,
+        "paperwidth_bp": width_bp,
+        "paperheight_bp": height_bp,
+        "page_width_in": round(width_in, 2),
+        "page_height_in": round(height_in, 2),
+        "font_size_pt": font_size_pt,
+        "margin_fractions": margin_fractions,
+        "margins_bp": margins_bp,
+        "geometry_options": geometry_options,
+        "sampled_image_count": len(margin_samples),
+        "strategy": "source_page_size_with_historical_margin_heuristic",
+    }
+
+
 def pdf_to_images(
     pdf_path: str,
     output_dir: str,
@@ -343,21 +565,28 @@ def call_vision(
             system_instruction=sys_prompt,
             max_output_tokens=max_tokens,
             safety_settings=_block_none_safety_settings(),
+            httpOptions=_request_http_options(),
         ),
     )
     return _extract_text(resp)
 
 
-def call_text(sys_prompt: str, user_prompt: str, max_tokens: int = 8192) -> str:
+def call_text(
+    sys_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 8192,
+    model: str | None = None,
+) -> str:
     """Call Gemini text API (no image)."""
     client = _ensure_genai_configured()
     resp = client.models.generate_content(
-        model=DEFAULT_MODEL,
+        model=model or DEFAULT_MODEL,
         contents=user_prompt,
         config=types.GenerateContentConfig(
             system_instruction=sys_prompt,
             max_output_tokens=max_tokens,
             safety_settings=_block_none_safety_settings(),
+            httpOptions=_request_http_options(),
         ),
     )
     return _extract_text(resp)
@@ -462,6 +691,15 @@ def _ensure_wrapfig_for_wrapped_floats(source: str) -> str:
     return _insert_before_document(source, "\\usepackage{wrapfig}")
 
 
+def _ensure_tikz_for_tikzpicture(source: str) -> str:
+    """Load TikZ when tikzpicture environments are present."""
+    if "\\usepackage{tikz}" in source:
+        return source
+    if "\\begin{tikzpicture}" not in source:
+        return source
+    return _insert_before_document(source, "\\usepackage{tikz}")
+
+
 def _ensure_pdflatex_unicode_support(source: str) -> str:
     """Inject minimal Unicode declarations needed for historical glyphs under pdfLaTeX."""
     if "ſ" not in source:
@@ -472,6 +710,60 @@ def _ensure_pdflatex_unicode_support(source: str) -> str:
     return _insert_before_document(source, "\\DeclareUnicodeCharacter{017F}{\\textlongs}")
 
 
+def _strip_xelatex_incompatible_unicode_declarations(source: str) -> str:
+    """Remove pdfLaTeX-only Unicode declarations that XeLaTeX does not define."""
+    return re.sub(
+        r"(?m)^[ \t]*\\DeclareUnicodeCharacter\{017F\}\{\\textlongs\}\s*\n?",
+        "",
+        source,
+    )
+
+
+def _replace_documentclass_font_size(source: str, font_size_pt: int) -> str:
+    """Replace or inject the top-level document font size option."""
+    match = re.search(r"\\documentclass(?:\[(.*?)\])?\{([^}]+)\}", source)
+    if not match:
+        return source
+
+    options = [opt.strip() for opt in (match.group(1) or "").split(",") if opt.strip()]
+    options = [opt for opt in options if not re.fullmatch(r"\d+pt", opt)]
+    options.insert(0, f"{font_size_pt}pt")
+    replacement = f"\\documentclass[{','.join(options)}]{{{match.group(2)}}}"
+    return source[: match.start()] + replacement + source[match.end() :]
+
+
+def apply_source_layout_profile(source: str, layout_profile: dict | None) -> str:
+    """Rewrite the documentclass size and geometry to better match the source scan."""
+    if not layout_profile:
+        return source
+
+    updated = _replace_documentclass_font_size(
+        source,
+        int(layout_profile.get("font_size_pt", 10)),
+    )
+    geometry_options = layout_profile.get("geometry_options")
+    if geometry_options:
+        if re.search(r"\\geometry\{[^}]*\}", updated):
+            updated = re.sub(
+                r"\\geometry\{[^}]*\}",
+                lambda _: f"\\geometry{{{geometry_options}}}",
+                updated,
+                count=1,
+            )
+        else:
+            if "\\usepackage{geometry}" not in updated:
+                updated = _insert_before_document(updated, "\\usepackage{geometry}")
+            updated = _insert_before_document(updated, f"\\geometry{{{geometry_options}}}")
+
+    comment = (
+        "% Auto layout profile: "
+        f"{layout_profile.get('page_width_in', '?')}in x "
+        f"{layout_profile.get('page_height_in', '?')}in, "
+        f"{layout_profile.get('font_size_pt', 10)}pt"
+    )
+    return _insert_before_document(updated, comment)
+
+
 def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
     """Apply deterministic source fixes that preserve content but improve compilability."""
     prepared = normalize_latex_source(source)
@@ -479,8 +771,11 @@ def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
     prepared = _normalize_decimal_cdots_in_text(prepared)
     prepared = _ensure_graphicx_for_box_commands(prepared)
     prepared = _ensure_wrapfig_for_wrapped_floats(prepared)
+    prepared = _ensure_tikz_for_tikzpicture(prepared)
     if compiler == "pdflatex":
         prepared = _ensure_pdflatex_unicode_support(prepared)
+    else:
+        prepared = _strip_xelatex_incompatible_unicode_declarations(prepared)
     return prepared
 
 
@@ -506,52 +801,151 @@ def _is_plausible_fix(old_source: str, new_source: str) -> bool:
     return True
 
 
+def _latex_basename(path: str) -> str:
+    normalized = path.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _missing_graphic_width(options: str | None) -> str:
+    if not options:
+        return "0.8\\linewidth"
+    match = re.search(r"width\s*=\s*([^,\]]+)", options)
+    if match:
+        return match.group(1).strip()
+    return "0.8\\linewidth"
+
+
+def _replace_missing_graphic_includes(source: str, error_log: str) -> str | None:
+    """Replace missing image includes with deterministic fallbacks."""
+    missing_files = {
+        match.group(1).strip()
+        for match in re.finditer(
+            r"File [`']([^`']+\.(?:pdf|png|jpg|jpeg|eps))[`'] not found",
+            error_log,
+            re.IGNORECASE,
+        )
+    }
+    if not missing_files:
+        return None
+
+    include_re = re.compile(
+        r"^(?P<indent>\s*)\\includegraphics(?P<opts>\[[^\]]*\])?\{(?P<path>[^}]+)\}(?P<trail>\s*(?:%.*)?)$"
+    )
+    commented_tikz_begin = re.compile(r"^\s*%\s*\\begin\{tikzpicture\}")
+    commented_tikz_end = re.compile(r"^\s*%\s*\\end\{tikzpicture\}")
+
+    lines = source.splitlines(keepends=True)
+    rewritten: list[str] = []
+    changed = False
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        match = include_re.match(line)
+        if not match:
+            rewritten.append(line)
+            index += 1
+            continue
+
+        path = match.group("path").strip()
+        path_name = _latex_basename(path)
+        if path not in missing_files and path_name not in missing_files:
+            rewritten.append(line)
+            index += 1
+            continue
+
+        indent = match.group("indent")
+        fallback_start = None
+        fallback_end = None
+        probe = index + 1
+        while probe < len(lines):
+            stripped = lines[probe].strip()
+            if not stripped:
+                probe += 1
+                continue
+            if not lines[probe].lstrip().startswith("%"):
+                break
+            if commented_tikz_begin.match(lines[probe]):
+                fallback_start = probe
+                probe += 1
+                while probe < len(lines):
+                    if commented_tikz_end.match(lines[probe]):
+                        fallback_end = probe
+                        break
+                    probe += 1
+                break
+            probe += 1
+
+        changed = True
+        if fallback_start is not None and fallback_end is not None:
+            rewritten.append(f"{indent}% Restored TikZ fallback for missing graphic: {path_name}\n")
+            for fallback_line in lines[fallback_start : fallback_end + 1]:
+                rewritten.append(re.sub(r"^(\s*)%\s?", r"\1", fallback_line))
+            index = fallback_end + 1
+            continue
+
+        width = _missing_graphic_width(match.group("opts"))
+        rewritten.append(f"{indent}% Missing source graphic: {path_name}\n")
+        rewritten.append(
+            f"{indent}\\fbox{{\\parbox[c][8em][c]{{{width}}}{{\\centering\\footnotesize Source diagram unavailable}}}}\n"
+        )
+        index += 1
+
+    if not changed:
+        return None
+    return "".join(rewritten)
+
+
 def _apply_common_compile_fix(source: str, error_log: str, compiler: str) -> str | None:
     """Apply deterministic fixes for common compiler/runtime issues."""
     normalized = prepare_latex_for_compile(source, compiler)
-    if normalized != source:
-        return normalized
+    working_source = normalized
+    missing_graphics = _replace_missing_graphic_includes(working_source, error_log)
+    if missing_graphics and missing_graphics != working_source:
+        return prepare_latex_for_compile(missing_graphics, compiler)
+    if working_source != source:
+        return working_source
     if (
         compiler == "pdflatex"
         and "font expansion" in error_log.lower()
-        and "\\microtypesetup{expansion=false}" not in source
+        and "\\microtypesetup{expansion=false}" not in working_source
     ):
         # Disable expansion when non-scalable fonts trigger pdfTeX microtype errors.
-        if "microtype" in source:
-            package_line = re.search(r"(\\usepackage\{[^}]*microtype[^}]*\})", source)
+        if "microtype" in working_source:
+            package_line = re.search(r"(\\usepackage\{[^}]*microtype[^}]*\})", working_source)
             if package_line:
-                return source.replace(
+                return working_source.replace(
                     package_line.group(1),
                     package_line.group(1) + "\n\\microtypesetup{expansion=false}",
                     1,
                 )
-            if "\\begin{document}" in source:
-                return source.replace(
+            if "\\begin{document}" in working_source:
+                return working_source.replace(
                     "\\begin{document}",
                     "\\microtypesetup{expansion=false}\n\\begin{document}",
                     1,
                 )
-    if "missing $ inserted" in error_log.lower() and "\\cdot" in source:
+    if "missing $ inserted" in error_log.lower() and "\\cdot" in working_source:
         # Common OCR/LLM artifact: \cdot emitted in text mode (often in fancyfoot).
         fixed = re.sub(
             r"\\cdot(?!\s*\$)",
             r"$\\cdot$",
-            source,
+            working_source,
         )
-        if fixed != source:
+        if fixed != working_source:
             return fixed
     if compiler == "xelatex" and "fontspec" in error_log.lower() and "cannot be found" in error_log.lower():
         # Replace unavailable font with a common Windows Korean font fallback.
-        if "\\setmainfont{" in source:
+        if "\\setmainfont{" in working_source:
             return re.sub(
                 r"\\setmainfont\{[^}]+\}",
                 r"\\setmainfont{Malgun Gothic}",
-                source,
+                working_source,
                 count=1,
             )
         # If no explicit main font exists, add one after kotex.
-        if "\\usepackage{kotex}" in source and "\\setmainfont{" not in source:
-            return source.replace("\\usepackage{kotex}", "\\usepackage{kotex}\n\\setmainfont{Malgun Gothic}")
+        if "\\usepackage{kotex}" in working_source and "\\setmainfont{" not in working_source:
+            return working_source.replace("\\usepackage{kotex}", "\\usepackage{kotex}\n\\setmainfont{Malgun Gothic}")
     return None
 
 
@@ -571,6 +965,7 @@ def compile_latex(
     source = prepare_latex_for_compile(source, compiler)
     with open(tex_path, "w", encoding="utf-8") as f:
         f.write(source)
+    compile_timeout_sec = _latex_compile_timeout_sec()
 
     cmd = [
         compiler,
@@ -582,7 +977,7 @@ def compile_latex(
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, encoding="utf-8",
+            cmd, capture_output=True, text=True, timeout=compile_timeout_sec, encoding="utf-8",
             errors="replace",
         )
         log_path = os.path.join(output_dir, f"{filename}.log")
@@ -595,7 +990,7 @@ def compile_latex(
         success = result.returncode == 0 and os.path.exists(pdf_path)
         return success, pdf_path, error_log
     except subprocess.TimeoutExpired:
-        return False, "", "Compilation timed out after 120 seconds."
+        return False, "", f"Compilation timed out after {compile_timeout_sec} seconds."
     except FileNotFoundError:
         return False, "", f"Compiler '{compiler}' not found. Is it installed?"
 

@@ -27,29 +27,57 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from prompts import (
+    METADATA_SYS, METADATA_USR,
     STEP1_SYS, STEP1_USR,
     STEP2_SYS, STEP2_USR,
     STEP3_SYS, STEP3_USR,
     STEP6_SYS, STEP6_USR,
     STEP7_SYS, STEP7_USR,
 )
+from publish import (
+    build_publish_bundle,
+    publish_bundle_to_supabase,
+    save_publish_report,
+)
 from steps import (
     pdf_to_images,
     get_pdf_page_count,
+    infer_source_layout_profile,
     call_vision,
     call_text,
+    TRANSLATION_MODEL,
     run_preflight_checks,
     extract_block,
     normalize_latex_source,
     is_latex_document,
     auto_fix_loop,
+    apply_source_layout_profile,
     merge_pages,
     finalize_report,
 )
 
 
+METADATA_FIELDS = (
+    "title",
+    "author",
+    "publication_year",
+    "death_year",
+    "journal_or_book",
+    "volume",
+    "issue",
+    "pages",
+    "language",
+    "doi",
+)
+METADATA_CONFIDENCE = {"high", "medium", "low", "none"}
+
+
 def pipeline_state_path(output_dir: str, name: str) -> str:
     return os.path.join(output_dir, f"{name}_pipeline_state.json")
+
+
+def metadata_report_path(output_dir: str, name: str) -> str:
+    return os.path.join(output_dir, f"{name}_metadata.json")
 
 
 def load_pipeline_state(output_dir: str, name: str) -> dict:
@@ -72,6 +100,281 @@ def copy_source_pdf(input_pdf: str, output_dir: str, name: str) -> str:
     if os.path.abspath(input_pdf) != os.path.abspath(source_copy_path):
         shutil.copyfile(input_pdf, source_copy_path)
     return source_copy_path
+
+
+def _clean_metadata_value(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _coerce_year(value) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if 1500 <= value <= 2100 else None
+    text = str(value).strip()
+    match = re.search(r"\b(1[5-9]\d{2}|20\d{2}|2100)\b", text)
+    if not match:
+        return None
+    year = int(match.group(1))
+    return year if 1500 <= year <= 2100 else None
+
+
+def extract_pdf_metadata(pdf_path: str) -> dict:
+    """Read raw PDF metadata and keep the common bibliographic fields."""
+    try:
+        import fitz
+    except Exception:
+        return {}
+
+    raw = {}
+    try:
+        doc = fitz.open(pdf_path)
+        raw = doc.metadata or {}
+        doc.close()
+    except Exception:
+        return {}
+
+    cleaned = {}
+    for key in ("title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate"):
+        value = _clean_metadata_value(raw.get(key))
+        if value is not None:
+            cleaned[key] = value
+    return cleaned
+
+
+def extract_json_object(text: str) -> dict | None:
+    """Extract the first JSON object from a model response."""
+    if not text:
+        return None
+    candidate = text.strip()
+    candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+    candidate = re.sub(r"\s*```$", "", candidate)
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(candidate):
+        if char != "{":
+            continue
+        try:
+            obj, _ = decoder.raw_decode(candidate[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def render_metadata_prompt(
+    paper_name: str,
+    raw_pdf_metadata_json: str,
+    structure_json: str,
+    first_page_latex: str,
+) -> str:
+    """Render the metadata prompt without interpreting JSON braces as format fields."""
+    return (
+        METADATA_USR
+        .replace("{paper_name}", paper_name)
+        .replace("{raw_pdf_metadata_json}", raw_pdf_metadata_json)
+        .replace("{structure_json}", structure_json)
+        .replace("{first_page_latex}", first_page_latex)
+    )
+
+
+def normalize_ai_metadata(raw: dict | None) -> dict:
+    """Coerce AI metadata into a stable shape."""
+    data = raw if isinstance(raw, dict) else {}
+    confidence_raw = data.get("confidence") if isinstance(data.get("confidence"), dict) else {}
+    evidence_raw = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+
+    normalized = {}
+    for field in METADATA_FIELDS:
+        value = data.get(field)
+        if field.endswith("_year"):
+            normalized[field] = _coerce_year(value)
+        else:
+            normalized[field] = _clean_metadata_value(value)
+
+    normalized["confidence"] = {}
+    normalized["evidence"] = {}
+    for field in METADATA_FIELDS:
+        conf = str(confidence_raw.get(field) or "").strip().lower()
+        if conf not in METADATA_CONFIDENCE:
+            conf = "low" if normalized[field] is not None else "none"
+        normalized["confidence"][field] = conf
+        normalized["evidence"][field] = _clean_metadata_value(evidence_raw.get(field))
+    return normalized
+
+
+def infer_metadata_from_structure(structure_json: str) -> dict:
+    """Infer basic metadata from STEP 1 structure JSON without another model call."""
+    try:
+        data = json.loads(structure_json)
+    except Exception:
+        return {field: None for field in ("title", "author", "publication_year", "death_year")}
+
+    article_header = data.get("article_header", {}) if isinstance(data, dict) else {}
+    title = _clean_metadata_value(article_header.get("title_text"))
+    author_line = _clean_metadata_value(article_header.get("author_line"))
+    author = None
+    if author_line:
+        author = re.sub(r"^(By|Von)\s+", "", author_line, flags=re.IGNORECASE)
+
+    blob = json.dumps(data, ensure_ascii=False)
+    years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", blob)
+    publication_year = int(years[0]) if years else None
+
+    known_death_years = {
+        "emmy noether": 1935,
+        "albert einstein": 1955,
+    }
+    death_year = known_death_years.get(author.lower()) if author else None
+    return {
+        "title": title,
+        "author": author,
+        "publication_year": publication_year,
+        "death_year": death_year,
+    }
+
+
+def infer_metadata_with_ai(
+    paper_name: str,
+    raw_pdf_metadata: dict,
+    structure_json: str,
+    first_page_latex: str,
+) -> dict:
+    """Ask the model to infer bibliographic metadata from page evidence."""
+    prompt = render_metadata_prompt(
+        paper_name=paper_name,
+        raw_pdf_metadata_json=json.dumps(raw_pdf_metadata or {}, ensure_ascii=False, indent=2),
+        structure_json=structure_json[:12000],
+        first_page_latex=first_page_latex[:12000],
+    )
+    try:
+        response = call_text(METADATA_SYS, prompt, max_tokens=4096)
+        payload = extract_json_object(response)
+        normalized = normalize_ai_metadata(payload)
+        normalized["status"] = "ok" if payload else "empty"
+        normalized["error"] = None if payload else "Could not parse metadata JSON response."
+        return normalized
+    except Exception as exc:
+        normalized = normalize_ai_metadata({})
+        normalized["status"] = "error"
+        normalized["error"] = str(exc).strip() or exc.__class__.__name__
+        return normalized
+
+
+def _should_use_ai_metadata(field: str, ai_metadata: dict, min_confidence: set[str]) -> bool:
+    value = ai_metadata.get(field)
+    if value is None:
+        return False
+    confidence = ai_metadata.get("confidence", {}).get(field, "none")
+    return confidence in min_confidence
+
+
+def build_effective_metadata(
+    user_author: str | None,
+    user_publication_year: int | None,
+    user_death_year: int | None,
+    raw_pdf_metadata: dict,
+    deterministic_metadata: dict,
+    ai_metadata: dict,
+) -> tuple[dict, dict]:
+    """Combine user, raw PDF, deterministic, and AI metadata for display/storage."""
+    effective = {
+        "title": None,
+        "author": None,
+        "publication_year": None,
+        "death_year": None,
+        "journal_or_book": None,
+        "volume": None,
+        "issue": None,
+        "pages": None,
+        "language": None,
+        "doi": None,
+    }
+    sources = {field: None for field in effective}
+
+    def assign(field: str, value, source: str):
+        if value is None or effective[field] is not None:
+            return
+        effective[field] = value
+        sources[field] = source
+
+    assign("title", raw_pdf_metadata.get("title"), "pdf")
+    assign("title", deterministic_metadata.get("title"), "structure")
+    if _should_use_ai_metadata("title", ai_metadata, {"high", "medium"}):
+        assign("title", ai_metadata.get("title"), "ai")
+
+    assign("author", _clean_metadata_value(user_author), "user")
+    assign("author", raw_pdf_metadata.get("author"), "pdf")
+    assign("author", deterministic_metadata.get("author"), "structure")
+    if _should_use_ai_metadata("author", ai_metadata, {"high", "medium"}):
+        assign("author", ai_metadata.get("author"), "ai")
+
+    assign("publication_year", _coerce_year(user_publication_year), "user")
+    assign("publication_year", deterministic_metadata.get("publication_year"), "structure")
+    if _should_use_ai_metadata("publication_year", ai_metadata, {"high", "medium"}):
+        assign("publication_year", ai_metadata.get("publication_year"), "ai")
+
+    assign("death_year", _coerce_year(user_death_year), "user")
+    assign("death_year", deterministic_metadata.get("death_year"), "structure")
+    if _should_use_ai_metadata("death_year", ai_metadata, {"high", "medium"}):
+        assign("death_year", ai_metadata.get("death_year"), "ai")
+
+    for field in ("journal_or_book", "volume", "issue", "pages", "language", "doi"):
+        if _should_use_ai_metadata(field, ai_metadata, {"high", "medium"}):
+            assign(field, ai_metadata.get(field), "ai")
+
+    return effective, sources
+
+
+def build_rights_metadata(
+    user_author: str | None,
+    user_publication_year: int | None,
+    user_death_year: int | None,
+    raw_pdf_metadata: dict,
+    deterministic_metadata: dict,
+    ai_metadata: dict,
+) -> tuple[dict, dict]:
+    """Choose conservative metadata values suitable for rights heuristics."""
+    values = {
+        "author": None,
+        "publication_year": None,
+        "death_year": None,
+    }
+    sources = {field: None for field in values}
+
+    def assign(field: str, value, source: str):
+        if value is None or values[field] is not None:
+            return
+        values[field] = value
+        sources[field] = source
+
+    assign("author", _clean_metadata_value(user_author), "user")
+    assign("publication_year", _coerce_year(user_publication_year), "user")
+    assign("death_year", _coerce_year(user_death_year), "user")
+
+    assign("author", raw_pdf_metadata.get("author"), "pdf")
+    assign("author", deterministic_metadata.get("author"), "structure")
+    assign("publication_year", deterministic_metadata.get("publication_year"), "structure")
+    assign("death_year", deterministic_metadata.get("death_year"), "structure")
+
+    if _should_use_ai_metadata("author", ai_metadata, {"high"}):
+        assign("author", ai_metadata.get("author"), "ai_high")
+    if _should_use_ai_metadata("publication_year", ai_metadata, {"high"}):
+        assign("publication_year", ai_metadata.get("publication_year"), "ai_high")
+    if _should_use_ai_metadata("death_year", ai_metadata, {"high"}):
+        assign("death_year", ai_metadata.get("death_year"), "ai_high")
+
+    return values, sources
+
+
+def save_metadata_report(output_dir: str, name: str, report: dict) -> str:
+    path = metadata_report_path(output_dir, name)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+    return path
 
 
 def parse_page_range(pages_str: str, total: int) -> list[int]:
@@ -143,34 +446,6 @@ def build_rights_context(rights_info: dict) -> str:
     return summary
 
 
-def infer_metadata_from_structure(structure_json: str) -> tuple[str | None, int | None, int | None]:
-    """Infer basic rights metadata from STEP 1 structure JSON."""
-    try:
-        data = json.loads(structure_json)
-    except Exception:
-        return None, None, None
-
-    author_line = (
-        data.get("article_header", {}).get("author_line")
-        if isinstance(data, dict)
-        else None
-    )
-    author = None
-    if isinstance(author_line, str) and author_line.strip():
-        author = re.sub(r"^(By|Von)\s+", "", author_line.strip(), flags=re.IGNORECASE)
-
-    blob = json.dumps(data, ensure_ascii=False)
-    years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", blob)
-    publication_year = int(years[0]) if years else None
-
-    known_death_years = {
-        "emmy noether": 1935,
-        "albert einstein": 1955,
-    }
-    death_year = known_death_years.get(author.lower()) if author else None
-    return author, publication_year, death_year
-
-
 def split_latex_into_page_docs(source: str) -> list[str]:
     """Split a merged LaTeX document into page-like mini documents by \\newpage."""
     m_begin = re.search(r"\\begin\{document\}", source)
@@ -203,6 +478,28 @@ def page_failure_path(output_dir: str, page_num: int) -> str:
     return os.path.join(output_dir, f"page_{page_num:03d}_failure.json")
 
 
+def should_reuse_cached_page(
+    *,
+    resume: bool,
+    page_num: int,
+    retry_page_numbers: set[int],
+    struct_path: str,
+    tex_path: str,
+) -> bool:
+    """Reuse cached page outputs only when the page is not being explicitly retried."""
+    return (
+        resume
+        and page_num not in retry_page_numbers
+        and os.path.exists(struct_path)
+        and os.path.exists(tex_path)
+    )
+
+
+def should_include_page_in_merge(page_num: int, failure_by_page: dict[int, dict]) -> bool:
+    """Exclude pages that failed in the current run even if stale TeX files still exist."""
+    return page_num not in failure_by_page
+
+
 def run_pipeline(
     input_pdf: str,
     name: str,
@@ -215,6 +512,7 @@ def run_pipeline(
     resume: bool = True,
     translation_chunk_pages: int = 4,
     retry_pages: str | None = None,
+    publish_enabled: bool = True,
 ):
     """Run the full STEP 0 ??8 pipeline."""
     print("[PREFLIGHT] Checking environment...")
@@ -235,12 +533,51 @@ def run_pipeline(
     source_pdf_path = copy_source_pdf(input_pdf, output_dir, name)
     existing_state = load_pipeline_state(output_dir, name)
     force_rebuild_downstream = bool(retry_pages)
+    translation_model_changed = existing_state.get("translation_model") != TRANSLATION_MODEL
     total_input_pages = get_pdf_page_count(input_pdf)
     images_dir = os.path.join(output_dir, "images")
+    raw_pdf_metadata = extract_pdf_metadata(source_pdf_path)
+    deterministic_metadata = {field: None for field in ("title", "author", "publication_year", "death_year")}
+    ai_metadata = normalize_ai_metadata({})
+    ai_metadata["status"] = "not_run"
+    ai_metadata["error"] = None
+
+    def refresh_metadata_report() -> tuple[dict, dict, dict, dict]:
+        effective_metadata, effective_sources = build_effective_metadata(
+            author,
+            publication_year,
+            death_year,
+            raw_pdf_metadata,
+            deterministic_metadata,
+            ai_metadata,
+        )
+        rights_metadata, rights_sources = build_rights_metadata(
+            author,
+            publication_year,
+            death_year,
+            raw_pdf_metadata,
+            deterministic_metadata,
+            ai_metadata,
+        )
+        metadata_report = {
+            "checked_at": datetime.now().isoformat(),
+            "paper_name": name,
+            "raw_pdf_metadata": raw_pdf_metadata,
+            "deterministic_inference": deterministic_metadata,
+            "ai_inference": ai_metadata,
+            "effective_metadata": effective_metadata,
+            "effective_sources": effective_sources,
+            "rights_metadata": rights_metadata,
+            "rights_sources": rights_sources,
+        }
+        save_metadata_report(output_dir, name, metadata_report)
+        return effective_metadata, effective_sources, rights_metadata, rights_sources
+
+    effective_metadata, effective_sources, rights_metadata, rights_sources = refresh_metadata_report()
     print("\n[RIGHTS] Running rights check heuristic...")
-    meta_author = author
-    meta_publication_year = publication_year
-    meta_death_year = death_year
+    meta_author = rights_metadata.get("author")
+    meta_publication_year = rights_metadata.get("publication_year")
+    meta_death_year = rights_metadata.get("death_year")
 
     rights_info = {
         "checked_at": datetime.now().isoformat(),
@@ -256,10 +593,12 @@ def run_pipeline(
     # ?? STEP 0: PDF ??Images ????????????????????????????????????????????
     print("\n[STEP 0] Converting PDF to images...")
     page_numbers = None
+    retry_page_numbers: set[int] = set()
     state_requested_pages = existing_state.get("requested_pages")
     if retry_pages:
         selected = parse_page_range(retry_pages, total_input_pages)
         page_numbers = selected
+        retry_page_numbers = {page_idx + 1 for page_idx in selected}
         requested_page_numbers = [
             int(page)
             for page in (state_requested_pages or list(range(1, total_input_pages + 1)))
@@ -282,6 +621,18 @@ def run_pipeline(
     else:
         page_jobs = [(page_idx + 1, path) for page_idx, path in zip(page_numbers, image_paths)]
 
+    layout_profile = infer_source_layout_profile(source_pdf_path, image_paths, page_numbers)
+    layout_profile_path = os.path.join(output_dir, f"{name}_layout_profile.json")
+    with open(layout_profile_path, "w", encoding="utf-8") as f:
+        json.dump(layout_profile, f, ensure_ascii=False, indent=2)
+    if layout_profile:
+        print(
+            "\n[LAYOUT] Source profile: "
+            f"{layout_profile['page_width_in']} x {layout_profile['page_height_in']} in, "
+            f"{layout_profile['font_size_pt']}pt base text."
+        )
+        print(f"  Layout profile saved: {layout_profile_path}")
+
     num_pages = len(requested_page_numbers)
     state = {
         "paper_name": name,
@@ -295,8 +646,16 @@ def run_pipeline(
         "author": author,
         "publication_year": publication_year,
         "death_year": death_year,
+        "raw_pdf_metadata": raw_pdf_metadata,
+        "metadata": effective_metadata,
+        "metadata_sources": effective_sources,
+        "rights_metadata": rights_metadata,
+        "rights_metadata_sources": rights_sources,
         "workers": workers,
         "translation_chunk_pages": translation_chunk_pages,
+        "translation_model": TRANSLATION_MODEL,
+        "publish_enabled": publish_enabled,
+        "layout_profile": layout_profile,
         "checked_at": datetime.now().isoformat(),
         "failed_pages": existing_state.get("failed_pages", []),
         "failed_page_details": existing_state.get("failed_page_details", []),
@@ -316,16 +675,24 @@ def run_pipeline(
         )
     }
 
-    def process_page(page_job: tuple[int, str]) -> tuple[int, str, str | None]:
+    def process_page(page_job: tuple[int, str]) -> tuple[int, str, str, str | None]:
         page_num, img_path = page_job
         struct_path = page_structure_path(output_dir, page_num)
         tex_path = page_tex_path(output_dir, page_num)
 
-        if resume and os.path.exists(struct_path) and os.path.exists(tex_path):
+        if should_reuse_cached_page(
+            resume=resume,
+            page_num=page_num,
+            retry_page_numbers=retry_page_numbers,
+            struct_path=struct_path,
+            tex_path=tex_path,
+        ):
             with open(tex_path, encoding="utf-8") as f:
                 latex_source = normalize_latex_source(f.read())
+            with open(struct_path, encoding="utf-8") as f:
+                structure_json = f.read()
             print(f"\n[STEP 1/2] Reusing cached page {page_num}/{num_pages}...")
-            return page_num, latex_source, None
+            return page_num, latex_source, structure_json, None
 
         print(f"\n[STEP 1] Analyzing structure ??page {page_num}/{num_pages}...")
         structure_json = call_vision(STEP1_SYS, f"{rights_context}\n\n{STEP1_USR}", img_path)
@@ -367,12 +734,12 @@ def run_pipeline(
             f.write(latex_source)
         print(f"  LaTeX saved: {tex_path}")
         notes = extract_block(transcription_response, "TRANSCRIPTION_NOTES")
-        return page_num, latex_source, notes
+        return page_num, latex_source, structure_json, notes
 
     def process_page_safe(page_job: tuple[int, str]) -> dict:
         page_num, img_path = page_job
         try:
-            result_page, latex_source, notes = process_page(page_job)
+            result_page, latex_source, structure_json, notes = process_page(page_job)
             failure_by_page.pop(page_num, None)
             failure_path = page_failure_path(output_dir, page_num)
             if os.path.exists(failure_path):
@@ -381,6 +748,7 @@ def run_pipeline(
                 "ok": True,
                 "page_number": result_page,
                 "latex_source": latex_source,
+                "structure_json": structure_json,
                 "notes": notes,
             }
         except Exception as exc:
@@ -414,32 +782,57 @@ def run_pipeline(
                     f"--- Page {first_result['page_number']} ---\n{first_result['notes']}"
                 )
 
-    if rights_info.get("assessment") == "unknown" and successful_results:
-        first_success_num = successful_results[0]["page_number"]
-        first_struct_path = page_structure_path(output_dir, first_success_num)
-        if os.path.exists(first_struct_path):
-            with open(first_struct_path, encoding="utf-8") as f:
-                first_structure_json = f.read()
-            inf_author, inf_pub_year, inf_death_year = infer_metadata_from_structure(first_structure_json)
-            if meta_author is None and inf_author:
-                meta_author = inf_author
-            if meta_publication_year is None and inf_pub_year:
-                meta_publication_year = inf_pub_year
-            if meta_death_year is None and inf_death_year:
-                meta_death_year = inf_death_year
-            if any(v is not None for v in [inf_author, inf_pub_year, inf_death_year]):
-                rights_info = {
-                    "checked_at": datetime.now().isoformat(),
-                    **assess_rights(meta_author, meta_publication_year, meta_death_year),
-                }
-                with open(rights_path, "w", encoding="utf-8") as f:
-                    json.dump(rights_info, f, ensure_ascii=False, indent=2)
-                rights_context = build_rights_context(rights_info)
-                print("  [RIGHTS] Updated from inferred metadata on page 1.")
-                print(
-                    f"  [RIGHTS] Assessment: {rights_info['assessment']} "
-                    f"({rights_info['reason']})"
-                )
+    if successful_results:
+        first_success = successful_results[0]
+        first_structure_json = first_success.get("structure_json") or ""
+        first_page_latex = first_success.get("latex_source") or ""
+        deterministic_metadata = infer_metadata_from_structure(first_structure_json)
+        ai_metadata = infer_metadata_with_ai(
+            name,
+            raw_pdf_metadata,
+            first_structure_json,
+            first_page_latex,
+        )
+        effective_metadata, effective_sources, rights_metadata, rights_sources = refresh_metadata_report()
+        state.update(
+            {
+                "metadata": effective_metadata,
+                "metadata_sources": effective_sources,
+                "rights_metadata": rights_metadata,
+                "rights_metadata_sources": rights_sources,
+            }
+        )
+        save_pipeline_state(output_dir, name, state)
+        print("\n[METADATA] Saved inferred metadata report.")
+        if ai_metadata.get("status") == "ok":
+            print(
+                "  [METADATA] AI fields: "
+                f"title={effective_metadata.get('title')!r}, "
+                f"author={effective_metadata.get('author')!r}, "
+                f"year={effective_metadata.get('publication_year')!r}"
+            )
+        elif ai_metadata.get("error"):
+            print(f"  [METADATA] AI inference skipped: {ai_metadata['error']}")
+
+        meta_author = rights_metadata.get("author")
+        meta_publication_year = rights_metadata.get("publication_year")
+        meta_death_year = rights_metadata.get("death_year")
+        rights_info = {
+            "checked_at": datetime.now().isoformat(),
+            **assess_rights(meta_author, meta_publication_year, meta_death_year),
+        }
+        with open(rights_path, "w", encoding="utf-8") as f:
+            json.dump(rights_info, f, ensure_ascii=False, indent=2)
+        rights_context = build_rights_context(rights_info)
+        print(
+            "  [RIGHTS] Updated from effective metadata "
+            f"(author source={rights_sources.get('author')}, "
+            f"year source={rights_sources.get('publication_year')})."
+        )
+        print(
+            f"  [RIGHTS] Assessment: {rights_info['assessment']} "
+            f"({rights_info['reason']})"
+        )
 
     remaining = page_jobs[1:]
     max_workers = max(1, min(workers, len(remaining))) if remaining else 1
@@ -467,6 +860,8 @@ def run_pipeline(
     successful_page_numbers = []
     page_latex_sources = []
     for page_num in requested_page_numbers:
+        if not should_include_page_in_merge(page_num, failure_by_page):
+            continue
         tex_path = page_tex_path(output_dir, page_num)
         if not os.path.exists(tex_path):
             continue
@@ -503,6 +898,7 @@ def run_pipeline(
     if (
         existing_state.get("successful_pages") != successful_page_numbers
         or existing_state.get("failed_pages") != failed_page_numbers
+        or existing_state.get("layout_profile") != layout_profile
     ):
         force_rebuild_downstream = True
     save_pipeline_state(output_dir, name, state)
@@ -529,6 +925,7 @@ def run_pipeline(
         f"out of {num_pages} requested..."
     )
     merged_latex = merge_pages(page_latex_sources)
+    merged_latex = apply_source_layout_profile(merged_latex, layout_profile)
     if not is_latex_document(merged_latex):
         raise RuntimeError("Merged LaTeX is malformed. Aborting before compilation.")
     merged_tex_path = os.path.join(output_dir, f"{name}_merged.tex")
@@ -578,12 +975,24 @@ def run_pipeline(
     # ?? STEP 5: Glossary ????????????????????????????????????????????????
     korean_tex_path = os.path.join(output_dir, f"{name}_Korean.tex")
     tnotes_path = os.path.join(output_dir, f"{name}_translation_notes.txt")
-    if resume and not force_rebuild_downstream and os.path.exists(korean_tex_path):
+    translation_rebuilt = False
+    if translation_model_changed:
+        print(
+            "\n[TRANSLATE] Translation model changed to "
+            f"{TRANSLATION_MODEL}; regenerating Korean LaTeX..."
+        )
+    if (
+        resume
+        and not force_rebuild_downstream
+        and not translation_model_changed
+        and os.path.exists(korean_tex_path)
+    ):
         print("\n[TRANSLATE] Reusing cached Korean LaTeX...")
         with open(korean_tex_path, encoding="utf-8") as f:
             korean_latex = f.read()
     else:
         print("\n[TRANSLATE] Translating to Korean...")
+        print(f"  [TRANSLATE] Model: {TRANSLATION_MODEL}")
         page_docs = split_latex_into_page_docs(final_dig_latex)
         groups = chunked(page_docs, translation_chunk_pages) if len(page_docs) > translation_chunk_pages else [page_docs]
 
@@ -595,7 +1004,12 @@ def run_pipeline(
             step6_user = STEP6_USR.format(
                 digitalized_latex_source=chunk_source,
             )
-            translation_response = call_text(STEP6_SYS, step6_user, max_tokens=16384)
+            translation_response = call_text(
+                STEP6_SYS,
+                step6_user,
+                max_tokens=16384,
+                model=TRANSLATION_MODEL,
+            )
             chunk_korean = extract_block(translation_response, "BEGIN_KOREAN_LATEX")
             if not chunk_korean:
                 print("  WARNING: Could not extract Korean LaTeX chunk. Using raw response.")
@@ -613,6 +1027,7 @@ def run_pipeline(
         if notes_all:
             with open(tnotes_path, "w", encoding="utf-8") as f:
                 f.write("\n\n".join(notes_all))
+        translation_rebuilt = True
     print(f"  Korean LaTeX saved: {korean_tex_path}")
 
     # ?? STEP 7: Compile Korean PDF (xelatex) + auto-fix ?????????????????
@@ -621,6 +1036,7 @@ def run_pipeline(
     if (
         resume
         and not force_rebuild_downstream
+        and not translation_rebuilt
         and os.path.exists(kor_pdf)
         and not os.path.exists(kor_err_log)
     ):
@@ -653,7 +1069,7 @@ def run_pipeline(
 
     # ?? STEP 8: Quality report ??????????????????????????????????????????
     print("\n[REPORT] Generating quality report...")
-    finalize_report(
+    quality_report_path = finalize_report(
         name,
         num_pages,
         dig_ok,
@@ -663,6 +1079,47 @@ def run_pipeline(
         failed_pages=failed_page_numbers,
     )
 
+    publish_report = {
+        "status": "disabled",
+        "reason": "Publishing disabled by configuration.",
+        "slug": None,
+        "published_at": None,
+    }
+    if publish_enabled:
+        print("\n[PUBLISH] Publishing archive bundle...")
+        try:
+            publish_bundle = build_publish_bundle(
+                output_dir=output_dir,
+                name=name,
+                source_pdf_path=source_pdf_path,
+                requested_page_numbers=requested_page_numbers,
+                successful_page_numbers=successful_page_numbers,
+                effective_metadata=effective_metadata,
+                rights_info=rights_info,
+                raw_pdf_metadata=raw_pdf_metadata,
+                deterministic_metadata=deterministic_metadata,
+                ai_metadata=ai_metadata,
+                layout_profile=layout_profile,
+                final_dig_latex=final_dig_latex,
+                final_kor_latex=final_kor_latex,
+            )
+            publish_report = publish_bundle_to_supabase(publish_bundle)
+        except Exception as exc:
+            publish_report = {
+                "status": "failed",
+                "reason": str(exc).strip() or exc.__class__.__name__,
+                "slug": effective_metadata.get("title") or name,
+                "published_at": None,
+            }
+        publish_report_path = save_publish_report(output_dir, name, publish_report)
+        print(f"  [PUBLISH] Report saved: {publish_report_path}")
+        print(
+            f"  [PUBLISH] Status: {publish_report['status']}"
+            + (f" ({publish_report['reason']})" if publish_report.get("reason") else "")
+        )
+    else:
+        publish_report_path = save_publish_report(output_dir, name, publish_report)
+
     state.update(
         {
             "digitalized_compiled": dig_ok,
@@ -670,6 +1127,9 @@ def run_pipeline(
             "failed_pages": failed_page_numbers,
             "failed_page_details": failed_page_details,
             "successful_pages": successful_page_numbers,
+            "quality_report_path": quality_report_path,
+            "publish_report": publish_report,
+            "publish_report_path": publish_report_path,
             "checked_at": datetime.now().isoformat(),
         }
     )
@@ -685,6 +1145,7 @@ def run_pipeline(
         print(f"  Failed pages:       {failed_page_numbers}")
     print(f"  Digitalized PDF:    {'OK' if dig_ok else 'FAILED'}")
     print(f"  Korean PDF:         {'OK' if kor_ok else 'FAILED'}")
+    print(f"  Publish:            {publish_report['status'].upper()}")
     print(f"  Output directory:   {output_dir}")
     print("=" * 60)
 
@@ -704,6 +1165,9 @@ def main():
     parser.add_argument("--no-resume", action="store_true", help="Disable cache/resume and recompute all steps")
     parser.add_argument("--translation-chunk-pages", type=int, default=4, help="Pages per translation chunk in STEP 6")
     parser.add_argument("--retry-pages", default=None, help="Retry only the given page range, e.g. '12' or '3,7'")
+    parser.add_argument("--publish", dest="publish_enabled", action="store_true", help="Publish results to Supabase after pipeline completion (default)")
+    parser.add_argument("--no-publish", dest="publish_enabled", action="store_false", help="Skip the Supabase publish step")
+    parser.set_defaults(publish_enabled=True)
 
     args = parser.parse_args()
 
@@ -723,6 +1187,7 @@ def main():
         not args.no_resume,
         args.translation_chunk_pages,
         args.retry_pages,
+        args.publish_enabled,
     )
 
 
