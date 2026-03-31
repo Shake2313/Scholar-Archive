@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
+import { getRightsLabel } from "@/lib/archive-utils";
 import type { ArchiveDocument, ArchivePage } from "@/lib/types";
 
 type PageWithUrls = ArchivePage & {
@@ -32,13 +34,20 @@ export function DocumentViewer({
       ? currentPage.digitalized_text ?? ""
       : currentPage.korean_text ?? "";
   }, [currentPage, tab]);
+  const rightsLabel = getRightsLabel(document.rights_assessment);
 
   return (
     <div className="viewerShell">
       <aside className="viewerSidebar">
         <div className="viewerSidebarCard">
+          <Link className="viewerBackLink" href="/browse">
+            Back to catalog
+          </Link>
           <p className="eyebrow">Document</p>
           <h1>{document.title}</h1>
+          {document.summary ? (
+            <p className="viewerSummary">{document.summary}</p>
+          ) : null}
           <dl className="metadataGrid">
             <div>
               <dt>Author</dt>
@@ -49,8 +58,20 @@ export function DocumentViewer({
               <dd>{document.publication_year ?? "n.d."}</dd>
             </div>
             <div>
+              <dt>Century</dt>
+              <dd>{document.century_label ?? "Undated"}</dd>
+            </div>
+            <div>
+              <dt>Language</dt>
+              <dd>{document.language ?? "Unknown"}</dd>
+            </div>
+            <div>
               <dt>Collection</dt>
               <dd>{document.journal_or_book ?? "Independent manuscript"}</dd>
+            </div>
+            <div>
+              <dt>Rights</dt>
+              <dd>{rightsLabel}</dd>
             </div>
             <div>
               <dt>Pages</dt>
@@ -58,6 +79,18 @@ export function DocumentViewer({
                 {document.page_count} / {document.requested_page_count}
               </dd>
             </div>
+            {document.page_range ? (
+              <div>
+                <dt>Page range</dt>
+                <dd>{document.page_range}</dd>
+              </div>
+            ) : null}
+            {document.doi ? (
+              <div>
+                <dt>DOI</dt>
+                <dd>{document.doi}</dd>
+              </div>
+            ) : null}
           </dl>
         </div>
 
@@ -117,9 +150,29 @@ export function DocumentViewer({
               Korean translation
             </button>
           </div>
-          <span className="viewerPageLabel">
-            {currentPage ? `Page ${currentPage.page_number}` : "No pages"}
-          </span>
+          <div className="viewerPageControls">
+            <button
+              className="tabButton"
+              disabled={pageIndex <= 0}
+              onClick={() => setPageIndex((index) => Math.max(index - 1, 0))}
+              type="button"
+            >
+              Previous page
+            </button>
+            <span className="viewerPageLabel">
+              {currentPage ? `Page ${currentPage.page_number}` : "No pages"}
+            </span>
+            <button
+              className="tabButton"
+              disabled={pageIndex >= pages.length - 1}
+              onClick={() =>
+                setPageIndex((index) => Math.min(index + 1, pages.length - 1))
+              }
+              type="button"
+            >
+              Next page
+            </button>
+          </div>
         </div>
 
         <div className="viewerPanels">

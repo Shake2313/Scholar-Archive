@@ -10,6 +10,7 @@ export function SiteHeader() {
         </Link>
         <nav className="siteNav">
           <Link href="/">Home</Link>
+          <Link href="/browse">Catalog</Link>
           <Link href="/browse/era">By Era</Link>
           <Link href="/browse/author">By Author</Link>
         </nav>

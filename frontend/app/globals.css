@@ -140,6 +140,17 @@ code {
     );
 }
 
+.heroPanelWide {
+  grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+  align-items: stretch;
+}
+
+.heroCopyBlock,
+.heroAside {
+  display: grid;
+  gap: 18px;
+}
+
 .heroPanel h1,
 .sectionPanel h1,
 .sectionPanel h2,
@@ -167,6 +178,10 @@ code {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.searchBarWide {
+  margin-top: 6px;
 }
 
 .primaryLink,
@@ -212,20 +227,116 @@ code {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
+.statsGrid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.statCard,
+.entryCard,
+.facetRow {
+  border-radius: 22px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.statCard {
+  padding: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.statValue {
+  font-family: var(--font-display), serif;
+  font-size: clamp(1.8rem, 3vw, 2.8rem);
+  line-height: 0.9;
+}
+
+.statLabel {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.entryGrid,
+.spotlightGrid {
+  display: grid;
+  gap: 18px;
+}
+
+.entryGrid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.spotlightGrid {
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+
+.entryCard {
+  padding: 22px;
+  display: grid;
+  gap: 10px;
+}
+
+.entryCard h3 {
+  margin: 0;
+  font-family: var(--font-display), serif;
+  font-size: 1.5rem;
+}
+
+.entryCard p:last-child {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.facetList {
+  display: grid;
+  gap: 10px;
+}
+
+.facetRow {
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.compactEmptyState {
+  min-height: 96px;
+  border-radius: 22px;
+}
+
 .documentCard {
   padding: 20px;
+  display: grid;
+  gap: 12px;
 }
 
 .documentCard h3 {
-  margin: 12px 0 10px;
+  margin: 0;
   font-size: 1.28rem;
   line-height: 1.2;
 }
 
-.documentCardMeta {
+.documentPillRow,
+.documentCardFooter {
   display: flex;
-  justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.documentCardFooter {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.documentPill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(62, 45, 22, 0.12);
+  background: rgba(255, 255, 255, 0.64);
   color: var(--muted);
   font-size: 0.82rem;
   text-transform: uppercase;
@@ -257,6 +368,111 @@ code {
   font: inherit;
 }
 
+.catalogFilters {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(150px, 1fr)) auto;
+  margin-top: 20px;
+}
+
+.catalogFilterField {
+  display: grid;
+  gap: 8px;
+}
+
+.catalogFilterField label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.catalogFilterField input,
+.catalogFilterField select {
+  width: 100%;
+  min-height: 50px;
+  padding: 12px 16px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  font: inherit;
+}
+
+.catalogFilterActions {
+  display: flex;
+  align-items: flex-end;
+}
+
+.catalogFilterActions button {
+  min-height: 50px;
+  padding: 0 18px;
+}
+
+.timelineNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.timelineNavLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.timelineNavLink small {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.eraSection {
+  scroll-margin-top: 110px;
+}
+
+.eraSectionMeta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.yearBucketList {
+  display: grid;
+  gap: 18px;
+}
+
+.yearBucket {
+  display: grid;
+  gap: 16px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(53, 40, 24, 0.1);
+}
+
+.yearBucket:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.yearBucketHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-end;
+}
+
+.yearBucketHeader h3 {
+  margin: 0;
+  font-family: var(--font-display), serif;
+  font-size: clamp(1.6rem, 2.2vw, 2.2rem);
+  line-height: 1;
+}
+
 .sectionHeader {
   display: flex;
   justify-content: space-between;
@@ -286,6 +502,19 @@ code {
 
 .viewerSidebarCard {
   padding: 22px;
+}
+
+.viewerBackLink {
+  display: inline-flex;
+  margin-bottom: 14px;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.viewerSummary {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
 }
 
 .metadataGrid {
@@ -332,6 +561,13 @@ code {
 .tabGroup {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+}
+
+.viewerPageControls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
   flex-wrap: wrap;
 }
 
@@ -389,12 +625,18 @@ code {
 @media (max-width: 1100px) {
   .viewerShell,
   .viewerPanels,
-  .heroPanel {
+  .heroPanel,
+  .spotlightGrid,
+  .catalogFilters {
     grid-template-columns: 1fr;
   }
 
   .viewerSidebar {
     position: static;
+  }
+
+  .catalogFilterActions {
+    align-items: stretch;
   }
 }
 
@@ -413,5 +655,11 @@ code {
 
   .siteNav {
     flex-wrap: wrap;
+  }
+
+  .statsGrid,
+  .entryGrid,
+  .cardGrid {
+    grid-template-columns: 1fr;
   }
 }

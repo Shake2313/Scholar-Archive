@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import sys
 import unicodedata
 from datetime import datetime
@@ -34,6 +35,30 @@ PIPELINE_VERSION = "scholar-archive-pipeline-v1"
 PAGE_TEX_PATTERN = re.compile(r"page_(\d{3})\.tex$")
 PAGE_STRUCTURE_PATTERN = re.compile(r"page_(\d{3})_structure\.json$")
 PAGE_FAILURE_PATTERN = re.compile(r"page_(\d{3})_failure\.json$")
+SUPABASE_PUBLISH_HEALTH_PATH = "storage/v1/bucket"
+SUPABASE_PUBLISH_HEALTH_TIMEOUT_SEC = 15
+DEFAULT_SLUG_CONFLICT_POLICY = "overwrite"
+VALID_SLUG_CONFLICT_POLICIES = {"overwrite", "skip"}
+OUTPUT_NAME_SUFFIXES = (
+    "_pipeline_state.json",
+    "_quality_report.json",
+    "_metadata.json",
+    "_rights_check.json",
+    "_digitalized.tex",
+    "_Korean.tex",
+)
+MANUAL_METADATA_FIELDS = (
+    "title",
+    "author",
+    "publication_year",
+    "death_year",
+    "journal_or_book",
+    "volume",
+    "issue",
+    "pages",
+    "language",
+    "doi",
+)
 
 
 def publish_report_path(output_dir: str, name: str) -> str:
@@ -53,6 +78,98 @@ def get_supabase_url() -> str | None:
 
 def get_supabase_service_key() -> str | None:
     return os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SECRET_KEY")
+
+
+def _supabase_missing_credentials_reason() -> str:
+    return (
+        "Supabase credentials are missing. "
+        "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY."
+    )
+
+
+def normalize_slug_conflict_policy(value: str | None) -> str:
+    policy = (value or DEFAULT_SLUG_CONFLICT_POLICY).strip().lower()
+    if policy not in VALID_SLUG_CONFLICT_POLICIES:
+        raise ValueError(
+            f"Unsupported slug conflict policy: {value}. "
+            f"Choose one of {', '.join(sorted(VALID_SLUG_CONFLICT_POLICIES))}."
+        )
+    return policy
+
+
+def metadata_override_path(output_dir: str | Path, name: str) -> str:
+    return str(Path(output_dir) / f"{name}_metadata_override.json")
+
+
+def check_supabase_publish_health(
+    base_url: str | None = None,
+    service_key: str | None = None,
+    *,
+    timeout_sec: int = SUPABASE_PUBLISH_HEALTH_TIMEOUT_SEC,
+) -> dict:
+    base_url = base_url or get_supabase_url()
+    service_key = service_key or get_supabase_service_key()
+    report = {
+        "checked_at": datetime.now().isoformat(),
+        "base_url": base_url,
+        "hostname": None,
+        "probe_path": SUPABASE_PUBLISH_HEALTH_PATH,
+        "timeout_sec": timeout_sec,
+        "service_key_present": bool(service_key),
+        "dns_ok": False,
+        "api_ok": False,
+        "ok": False,
+        "status": "unknown",
+        "reason": None,
+    }
+    if not base_url or not service_key:
+        report["status"] = "missing_credentials"
+        report["reason"] = _supabase_missing_credentials_reason()
+        return report
+
+    parsed = parse.urlsplit(base_url)
+    hostname = parsed.hostname
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    report["hostname"] = hostname
+    if parsed.scheme not in {"http", "https"} or not hostname:
+        report["status"] = "invalid_url"
+        report["reason"] = f"SUPABASE_URL is invalid: {base_url}"
+        return report
+
+    try:
+        socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        report["dns_ok"] = True
+    except socket.gaierror as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        report["status"] = "dns_failed"
+        report["reason"] = f"Could not resolve Supabase host {hostname}: {detail}"
+        return report
+
+    try:
+        _supabase_request(
+            base_url=base_url,
+            service_key=service_key,
+            method="GET",
+            path=SUPABASE_PUBLISH_HEALTH_PATH,
+            headers={"Accept": "application/json"},
+            expect_json=True,
+            timeout_sec=timeout_sec,
+        )
+    except RuntimeError as exc:
+        message = str(exc).strip() or exc.__class__.__name__
+        if "(401)" in message or "(403)" in message:
+            report["api_ok"] = True
+            report["status"] = "auth_failed"
+            report["reason"] = f"Supabase API rejected the service key: {message}"
+            return report
+        report["status"] = "api_failed"
+        report["reason"] = message
+        return report
+
+    report["api_ok"] = True
+    report["ok"] = True
+    report["status"] = "ok"
+    return report
 
 
 def _ascii_normalize(value: str | None) -> str:
@@ -146,6 +263,99 @@ def _coerce_year(value: Any) -> int | None:
         return None
     year = int(match.group(1))
     return year if 1500 <= year <= 2100 else None
+
+
+def normalize_metadata_override(raw: dict[str, Any] | None) -> dict[str, Any]:
+    payload = raw if isinstance(raw, dict) else {}
+    overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else payload
+    normalized: dict[str, Any] = {}
+    for field in MANUAL_METADATA_FIELDS:
+        value = overrides.get(field)
+        if field.endswith("_year"):
+            coerced = _coerce_year(value)
+        else:
+            coerced = _clean_metadata_value(value)
+        if coerced is not None:
+            normalized[field] = coerced
+    return normalized
+
+
+def load_metadata_override(output_dir: str | Path, name: str) -> dict[str, Any]:
+    path = Path(metadata_override_path(output_dir, name))
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return normalize_metadata_override(data if isinstance(data, dict) else {})
+
+
+def write_metadata_override(
+    output_dir: str | Path,
+    name: str,
+    overrides: dict[str, Any],
+) -> str:
+    normalized = normalize_metadata_override(overrides)
+    path = Path(metadata_override_path(output_dir, name))
+    path.write_text(
+        json.dumps(
+            {
+                "updated_at": datetime.now().isoformat(),
+                "overrides": normalized,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def delete_metadata_override(output_dir: str | Path, name: str) -> str | None:
+    path = Path(metadata_override_path(output_dir, name))
+    if not path.exists():
+        return None
+    path.unlink()
+    return str(path)
+
+
+def save_metadata_override(
+    output_dir: str | Path,
+    name: str,
+    overrides: dict[str, Any],
+) -> str:
+    normalized = normalize_metadata_override(overrides)
+    existing = load_metadata_override(output_dir, name)
+    merged = {**existing, **normalized}
+    return write_metadata_override(output_dir, name, merged)
+
+
+def apply_metadata_override(
+    metadata: dict[str, Any] | None,
+    overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(metadata or {})
+    for field, value in normalize_metadata_override(overrides).items():
+        merged[field] = value
+    return merged
+
+
+def metadata_override_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return normalize_metadata_override(
+        {
+            "title": getattr(args, "title", None),
+            "author": getattr(args, "author", None),
+            "publication_year": getattr(args, "publication_year", None),
+            "death_year": getattr(args, "death_year", None),
+            "journal_or_book": getattr(args, "journal_or_book", None),
+            "volume": getattr(args, "volume", None),
+            "issue": getattr(args, "issue", None),
+            "pages": getattr(args, "pages", None),
+            "language": getattr(args, "language", None),
+            "doi": getattr(args, "doi", None),
+        }
+    )
 
 
 def extract_pdf_metadata(pdf_path: str) -> dict:
@@ -425,6 +635,7 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
     pipeline_state = _load_json_if_exists(base / f"{name}_pipeline_state.json")
     rights_info = _load_json_if_exists(base / f"{name}_rights_check.json")
     layout_profile = _load_json_if_exists(base / f"{name}_layout_profile.json")
+    manual_override = load_metadata_override(output_dir, name)
 
     source_pdf = str(source_pdf_path) if source_pdf_path.exists() else ""
     raw_pdf_metadata = metadata_report.get("raw_pdf_metadata") or (
@@ -438,6 +649,7 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
         deterministic_metadata,
         rights_info,
     )
+    effective_metadata = apply_metadata_override(effective_metadata, manual_override)
 
     if not rights_info:
         rights_info = assess_rights(
@@ -445,6 +657,13 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
             effective_metadata.get("publication_year"),
             effective_metadata.get("death_year"),
         )
+    else:
+        rights_info = {
+            **rights_info,
+            "author": effective_metadata.get("author"),
+            "publication_year": effective_metadata.get("publication_year"),
+            "death_year": effective_metadata.get("death_year"),
+        }
 
     successful_page_numbers = _coerce_page_numbers(pipeline_state.get("successful_pages"))
     if not successful_page_numbers:
@@ -471,7 +690,26 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
         layout_profile=layout_profile or None,
         final_dig_latex=_load_text(digitalized_tex_path),
         final_kor_latex=_load_text(korean_tex_path),
+        manual_override=manual_override,
     )
+
+
+def infer_output_name(output_dir: str | Path) -> str:
+    base = Path(output_dir)
+    candidates: list[str] = []
+    for suffix in OUTPUT_NAME_SUFFIXES:
+        for path in sorted(base.glob(f"*{suffix}")):
+            prefix = path.name[: -len(suffix)]
+            if prefix:
+                candidates.append(prefix)
+    unique = sorted(set(candidates))
+    if len(unique) == 1:
+        return unique[0]
+    if len(unique) > 1:
+        raise RuntimeError(
+            f"Could not infer a single output name for {base}: found {', '.join(unique)}"
+        )
+    raise FileNotFoundError(f"Could not infer output name from {base}")
 
 
 def _page_asset_path(asset_index: dict[str, dict], relative_path: str) -> str | None:
@@ -494,6 +732,7 @@ def build_publish_bundle(
     layout_profile: dict | None,
     final_dig_latex: str,
     final_kor_latex: str,
+    manual_override: dict[str, Any] | None = None,
 ) -> dict:
     bucket = os.environ.get("SUPABASE_STORAGE_BUCKET", DEFAULT_STORAGE_BUCKET)
     title = effective_metadata.get("title") or name
@@ -575,6 +814,7 @@ def build_publish_bundle(
         "deterministic_metadata": deterministic_metadata or {},
         "ai_metadata": ai_metadata or {},
         "effective_metadata": effective_metadata or {},
+        "manual_override": normalize_metadata_override(manual_override),
         "rights_metadata": {
             "author": rights_info.get("author"),
             "publication_year": rights_info.get("publication_year"),
@@ -606,6 +846,7 @@ def _supabase_request(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
     expect_json: bool = True,
+    timeout_sec: int = 120,
 ) -> Any:
     url = base_url.rstrip("/") + "/" + path.lstrip("/")
     if query:
@@ -618,7 +859,7 @@ def _supabase_request(
         request_headers.update(headers)
     req = request.Request(url, method=method.upper(), headers=request_headers, data=body)
     try:
-        with request.urlopen(req, timeout=120) as response:
+        with request.urlopen(req, timeout=timeout_sec) as response:
             payload = response.read()
             if not expect_json:
                 return payload
@@ -628,6 +869,14 @@ def _supabase_request(
     except error.HTTPError as exc:
         message = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Supabase {method.upper()} {path} failed ({exc.code}): {message}") from exc
+    except error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            hostname = parse.urlsplit(base_url).hostname or base_url
+            raise RuntimeError(
+                f"Supabase {method.upper()} {path} failed: could not resolve {hostname}: {reason}"
+            ) from exc
+        raise RuntimeError(f"Supabase {method.upper()} {path} failed: {reason}") from exc
 
 
 def _upload_asset(base_url: str, service_key: str, asset: dict) -> None:
@@ -709,18 +958,68 @@ def _delete_rows(base_url: str, service_key: str, table: str, filters: dict[str,
     )
 
 
-def publish_bundle_to_supabase(bundle: dict) -> dict:
+def _fetch_existing_document_by_slug(
+    base_url: str,
+    service_key: str,
+    slug: str,
+) -> dict[str, Any] | None:
+    rows = _supabase_request(
+        base_url=base_url,
+        service_key=service_key,
+        method="GET",
+        path="rest/v1/documents",
+        query={
+            "select": "id,slug,title,published_at,updated_at",
+            "slug": f"eq.{slug}",
+            "limit": 1,
+        },
+        headers={"Accept": "application/json"},
+        expect_json=True,
+    )
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        return first if isinstance(first, dict) else None
+    return None
+
+
+def publish_bundle_to_supabase(
+    bundle: dict,
+    *,
+    slug_conflict_policy: str = DEFAULT_SLUG_CONFLICT_POLICY,
+) -> dict:
     base_url = get_supabase_url()
     service_key = get_supabase_service_key()
-    if not base_url or not service_key:
+    slug_conflict_policy = normalize_slug_conflict_policy(slug_conflict_policy)
+    health_check = check_supabase_publish_health(base_url, service_key)
+    if not health_check["ok"]:
+        return {
+            "status": "skipped" if health_check["status"] == "missing_credentials" else "failed",
+            "reason": health_check["reason"],
+            "slug": bundle["document"]["slug"],
+            "published_at": None,
+            "health_check": health_check,
+            "slug_conflict_policy": slug_conflict_policy,
+        }
+
+    existing_document = _fetch_existing_document_by_slug(
+        base_url,
+        service_key,
+        bundle["document"]["slug"],
+    )
+    if existing_document and slug_conflict_policy == "skip":
         return {
             "status": "skipped",
             "reason": (
-                "Supabase credentials are missing. "
-                "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY or SUPABASE_SECRET_KEY."
+                f"Document slug '{bundle['document']['slug']}' already exists "
+                "and slug conflict policy is skip."
             ),
             "slug": bundle["document"]["slug"],
             "published_at": None,
+            "health_check": health_check,
+            "slug_conflict_policy": slug_conflict_policy,
+            "overwrote_existing": False,
+            "existing_document_id": existing_document.get("id"),
+            "existing_document_title": existing_document.get("title"),
         }
 
     _ensure_storage_bucket(base_url, service_key, bundle["storage_bucket"])
@@ -779,7 +1078,11 @@ def publish_bundle_to_supabase(bundle: dict) -> dict:
 
     return {
         "status": "published",
-        "reason": None,
+        "reason": (
+            f"Overwrote existing document for slug '{document['slug']}'."
+            if existing_document
+            else None
+        ),
         "document_id": document_id,
         "slug": document["slug"],
         "storage_bucket": bundle["storage_bucket"],
@@ -787,6 +1090,176 @@ def publish_bundle_to_supabase(bundle: dict) -> dict:
         "uploaded_assets": len(bundle["assets"]),
         "published_pages": len(bundle["pages"]),
         "published_at": datetime.now().isoformat(),
+        "health_check": health_check,
+        "slug_conflict_policy": slug_conflict_policy,
+        "overwrote_existing": bool(existing_document),
+        "existing_document_id": existing_document.get("id") if existing_document else None,
+        "existing_document_title": existing_document.get("title") if existing_document else None,
+    }
+
+
+def build_dry_run_publish_report(bundle: dict) -> dict:
+    return {
+        "status": "dry_run",
+        "reason": None,
+        "slug": bundle["document"]["slug"],
+        "storage_bucket": bundle["storage_bucket"],
+        "storage_root": bundle["storage_root"],
+        "uploaded_assets": len(bundle["assets"]),
+        "published_pages": len(bundle["pages"]),
+        "published_at": None,
+    }
+
+
+def publish_existing_output(
+    *,
+    output_dir: str,
+    name: str,
+    dry_run: bool = False,
+    slug_conflict_policy: str = DEFAULT_SLUG_CONFLICT_POLICY,
+) -> dict:
+    slug_conflict_policy = normalize_slug_conflict_policy(slug_conflict_policy)
+    bundle = build_publish_bundle_from_existing_output(
+        output_dir=output_dir,
+        name=name,
+    )
+    report = (
+        {
+            **build_dry_run_publish_report(bundle),
+            "slug_conflict_policy": slug_conflict_policy,
+        }
+        if dry_run
+        else publish_bundle_to_supabase(
+            bundle,
+            slug_conflict_policy=slug_conflict_policy,
+        )
+    )
+    report_path = save_publish_report(output_dir, name, report)
+    return {
+        "output_dir": str(Path(output_dir).resolve()),
+        "name": name,
+        "slug": report.get("slug") or bundle["document"]["slug"],
+        "report": report,
+        "report_path": report_path,
+    }
+
+
+def collect_publish_queue(output_root: str | Path, *, limit: int | None = None) -> dict[str, list[dict]]:
+    from operations import collect_output_summaries
+
+    queue: list[dict] = []
+    skipped: list[dict] = []
+    seen_slugs: dict[str, dict] = {}
+    for summary in collect_output_summaries(output_root):
+        if not summary.get("publish_ready"):
+            continue
+        output_dir = summary["path"]
+        try:
+            name = infer_output_name(output_dir)
+        except Exception as exc:
+            skipped.append(
+                {
+                    "path": output_dir,
+                    "folder_name": summary["folder_name"],
+                    "status": "skipped_unresolved_name",
+                    "reason": str(exc).strip() or exc.__class__.__name__,
+                }
+            )
+            continue
+        slug = slugify(summary.get("title") or name)
+        if slug in seen_slugs:
+            skipped.append(
+                {
+                    "path": output_dir,
+                    "folder_name": summary["folder_name"],
+                    "name": name,
+                    "slug": slug,
+                    "status": "skipped_duplicate_slug",
+                    "reason": (
+                        f"Slug '{slug}' is already queued for "
+                        f"{seen_slugs[slug]['folder_name']}."
+                    ),
+                }
+            )
+            continue
+        entry = {
+            "path": output_dir,
+            "folder_name": summary["folder_name"],
+            "name": name,
+            "slug": slug,
+            "title": summary.get("title"),
+            "priority_rank": summary.get("priority_rank"),
+            "updated_at": summary.get("updated_at"),
+        }
+        queue.append(entry)
+        seen_slugs[slug] = entry
+        if limit is not None and limit > 0 and len(queue) >= limit:
+            break
+    return {"queued": queue, "skipped": skipped}
+
+
+def publish_ready_outputs(
+    output_root: str | Path,
+    *,
+    limit: int | None = None,
+    dry_run: bool = False,
+    slug_conflict_policy: str = DEFAULT_SLUG_CONFLICT_POLICY,
+) -> dict:
+    slug_conflict_policy = normalize_slug_conflict_policy(slug_conflict_policy)
+    queue_info = collect_publish_queue(output_root, limit=limit)
+    results = []
+    for entry in queue_info["queued"]:
+        try:
+            outcome = publish_existing_output(
+                output_dir=entry["path"],
+                name=entry["name"],
+                dry_run=dry_run,
+                slug_conflict_policy=slug_conflict_policy,
+            )
+            results.append(
+                {
+                    **entry,
+                    "status": outcome["report"]["status"],
+                    "reason": outcome["report"].get("reason"),
+                    "report_path": outcome["report_path"],
+                    "published_at": outcome["report"].get("published_at"),
+                    "slug_conflict_policy": outcome["report"].get("slug_conflict_policy"),
+                    "overwrote_existing": outcome["report"].get("overwrote_existing"),
+                }
+            )
+        except Exception as exc:
+            failed_report = {
+                "status": "failed",
+                "reason": str(exc).strip() or exc.__class__.__name__,
+                "slug": entry["slug"],
+                "published_at": None,
+                "slug_conflict_policy": slug_conflict_policy,
+            }
+            report_path = save_publish_report(entry["path"], entry["name"], failed_report)
+            results.append(
+                {
+                    **entry,
+                    "status": "failed",
+                    "reason": failed_report["reason"],
+                    "report_path": report_path,
+                    "published_at": None,
+                    "slug_conflict_policy": slug_conflict_policy,
+                    "overwrote_existing": False,
+                }
+            )
+    return {
+        "output_root": str(Path(output_root).resolve()),
+        "queued": queue_info["queued"],
+        "skipped": queue_info["skipped"],
+        "results": results,
+        "slug_conflict_policy": slug_conflict_policy,
+        "counts": {
+            "queued_outputs": len(queue_info["queued"]),
+            "skipped_outputs": len(queue_info["skipped"]),
+            "published_outputs": sum(1 for item in results if item["status"] == "published"),
+            "failed_outputs": sum(1 for item in results if item["status"] == "failed"),
+            "dry_run_outputs": sum(1 for item in results if item["status"] == "dry_run"),
+        },
     }
 
 
@@ -794,33 +1267,104 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Publish an existing Scholar Archive output directory to Supabase."
     )
-    parser.add_argument("--output-dir", required=True, help="Existing pipeline output directory")
-    parser.add_argument("--name", required=True, help="Document name prefix used in output filenames")
+    parser.add_argument("--output-dir", help="Existing pipeline output directory")
+    parser.add_argument("--output-root", help="Root folder containing multiple pipeline output directories")
+    parser.add_argument("--name", help="Document name prefix used in output filenames")
+    parser.add_argument(
+        "--write-metadata-override",
+        action="store_true",
+        help="Write or update a manual metadata override file for an existing output directory",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of publish-ready output directories to process when using --output-root",
+    )
+    parser.add_argument(
+        "--slug-conflict",
+        choices=sorted(VALID_SLUG_CONFLICT_POLICIES),
+        default=DEFAULT_SLUG_CONFLICT_POLICY,
+        help=(
+            "How to handle an existing remote document with the same slug. "
+            "'overwrite' updates the existing document in place; 'skip' leaves it unchanged."
+        ),
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build the publish bundle and write a report without uploading anything",
     )
+    parser.add_argument("--title", help="Manual metadata override for title")
+    parser.add_argument("--author", help="Manual metadata override for author")
+    parser.add_argument("--publication-year", type=int, help="Manual metadata override for publication year")
+    parser.add_argument("--death-year", type=int, help="Manual metadata override for author death year")
+    parser.add_argument("--journal-or-book", help="Manual metadata override for journal or book")
+    parser.add_argument("--volume", help="Manual metadata override for volume")
+    parser.add_argument("--issue", help="Manual metadata override for issue")
+    parser.add_argument("--pages", help="Manual metadata override for page range")
+    parser.add_argument("--language", help="Manual metadata override for language")
+    parser.add_argument("--doi", help="Manual metadata override for DOI")
     args = parser.parse_args()
+    if bool(args.output_dir) == bool(args.output_root):
+        parser.error("Choose exactly one of --output-dir or --output-root.")
+    if args.output_dir and not args.name:
+        parser.error("--name is required when using --output-dir.")
+    if args.output_root and args.name:
+        parser.error("--name is only valid when using --output-dir.")
+    if args.write_metadata_override and args.output_root:
+        parser.error("--write-metadata-override only works with --output-dir.")
 
     try:
-        bundle = build_publish_bundle_from_existing_output(
+        if args.output_root:
+            batch = publish_ready_outputs(
+                args.output_root,
+                limit=args.limit,
+                dry_run=args.dry_run,
+                slug_conflict_policy=args.slug_conflict,
+            )
+            print(f"Output root: {batch['output_root']}")
+            print(f"Queued: {batch['counts']['queued_outputs']}")
+            print(f"Skipped: {batch['counts']['skipped_outputs']}")
+            print(f"Slug conflict policy: {batch['slug_conflict_policy']}")
+            for item in batch["skipped"]:
+                print(
+                    f"SKIPPED {item['folder_name']}: {item['status']} - {item['reason']}"
+                )
+            for item in batch["results"]:
+                print(
+                    f"{item['status'].upper()} {item['folder_name']} ({item['slug']}): "
+                    f"{item['reason'] or 'ok'}"
+                )
+            if batch["counts"]["failed_outputs"] > 0:
+                raise SystemExit(1)
+            return
+
+        if args.write_metadata_override:
+            overrides = metadata_override_from_args(args)
+            if not overrides:
+                parser.error(
+                    "--write-metadata-override requires at least one metadata field such as "
+                    "--title, --author, or --publication-year."
+                )
+            override_path_value = save_metadata_override(
+                args.output_dir,
+                args.name,
+                overrides,
+            )
+            print(f"Metadata override saved: {override_path_value}")
+            print("Override fields: " + ", ".join(sorted(overrides)))
+            return
+
+        report_path = None
+        result = publish_existing_output(
             output_dir=args.output_dir,
             name=args.name,
+            dry_run=args.dry_run,
+            slug_conflict_policy=args.slug_conflict,
         )
-        if args.dry_run:
-            report = {
-                "status": "dry_run",
-                "reason": None,
-                "slug": bundle["document"]["slug"],
-                "storage_bucket": bundle["storage_bucket"],
-                "storage_root": bundle["storage_root"],
-                "uploaded_assets": len(bundle["assets"]),
-                "published_pages": len(bundle["pages"]),
-                "published_at": None,
-            }
-        else:
-            report = publish_bundle_to_supabase(bundle)
+        report = result["report"]
+        report_path = result["report_path"]
     except Exception as exc:
         report = {
             "status": "failed",
@@ -828,8 +1372,7 @@ def main() -> None:
             "slug": None,
             "published_at": None,
         }
-
-    report_path = save_publish_report(args.output_dir, args.name, report)
+        report_path = save_publish_report(args.output_dir, args.name, report)
     print(f"Publish report saved: {report_path}")
     print(f"Status: {report['status']}")
     if report.get("slug"):

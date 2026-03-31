@@ -1,19 +1,37 @@
+import io
 import os
 import shutil
+import sys
 import unittest
 import uuid
 from pathlib import Path
 
 from pipeline import (
+    apply_manual_metadata_override,
     build_effective_metadata,
     build_rights_metadata,
+    collect_cached_image_paths,
     chunked,
     extract_json_object,
+    find_first_cached_page_artifacts,
     load_pipeline_state,
+    load_metadata_report,
     normalize_ai_metadata,
+    normalize_recorded_ai_metadata,
+    normalize_page_numbers,
+    page_image_path,
     parse_page_range,
+    pipeline_stderr_log_path,
     pipeline_state_path,
+    pipeline_stdout_log_path,
+    preflight_kwargs_for_run_mode,
+    redirect_pipeline_output,
+    resolve_run_mode,
     render_metadata_prompt,
+    RUN_MODE_FULL,
+    RUN_MODE_KOREAN_PDF_ONLY,
+    RUN_MODE_METADATA_ONLY,
+    RUN_MODE_TRANSLATION_ONLY,
     save_pipeline_state,
     should_include_page_in_merge,
     should_reuse_cached_page,
@@ -58,6 +76,112 @@ class PipelineHelperTests(unittest.TestCase):
 
     def test_chunked_non_positive_size_returns_single_chunk(self):
         self.assertEqual(chunked([1, 2, 3], 0), [[1, 2, 3]])
+
+    def test_resolve_run_mode_defaults_to_full(self):
+        self.assertEqual(resolve_run_mode(), RUN_MODE_FULL)
+
+    def test_resolve_run_mode_returns_selected_stage_only_mode(self):
+        self.assertEqual(resolve_run_mode(metadata_only=True), RUN_MODE_METADATA_ONLY)
+        self.assertEqual(resolve_run_mode(translation_only=True), RUN_MODE_TRANSLATION_ONLY)
+        self.assertEqual(resolve_run_mode(korean_pdf_only=True), RUN_MODE_KOREAN_PDF_ONLY)
+
+    def test_resolve_run_mode_rejects_multiple_stage_flags(self):
+        with self.assertRaises(ValueError):
+            resolve_run_mode(metadata_only=True, translation_only=True)
+
+    def test_preflight_kwargs_for_run_mode_match_stage_requirements(self):
+        self.assertEqual(
+            preflight_kwargs_for_run_mode(RUN_MODE_METADATA_ONLY),
+            {"needs_genai": True, "needs_pdf": False, "latex_compilers": ()},
+        )
+        self.assertEqual(
+            preflight_kwargs_for_run_mode(RUN_MODE_TRANSLATION_ONLY),
+            {"needs_genai": True, "needs_pdf": False, "latex_compilers": ()},
+        )
+        self.assertEqual(
+            preflight_kwargs_for_run_mode(RUN_MODE_KOREAN_PDF_ONLY),
+            {"needs_genai": False, "needs_pdf": False, "latex_compilers": ("xelatex",)},
+        )
+
+    def test_normalize_page_numbers_filters_invalid_values(self):
+        self.assertEqual(normalize_page_numbers([3, "2", 2, 0, -1, "x"]), [3, 2])
+
+    def test_find_first_cached_page_artifacts_prefers_candidate_page_order(self):
+        tmpdir = Path(self.make_workspace_dir())
+        (tmpdir / "page_002_structure.json").write_text("{}", encoding="utf-8")
+        (tmpdir / "page_002.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\nPage two\n\\end{document}\n",
+            encoding="utf-8",
+        )
+        (tmpdir / "page_001_structure.json").write_text("{}", encoding="utf-8")
+        (tmpdir / "page_001.tex").write_text(
+            "\\documentclass{article}\n\\begin{document}\nPage one\n\\end{document}\n",
+            encoding="utf-8",
+        )
+
+        page_num, structure_json, latex_source = find_first_cached_page_artifacts(
+            str(tmpdir),
+            [2, 1],
+        )
+        self.assertEqual(page_num, 2)
+        self.assertEqual(structure_json, "{}")
+        self.assertIn("Page two", latex_source)
+
+    def test_collect_cached_image_paths_requires_all_requested_pages(self):
+        tmpdir = Path(self.make_workspace_dir())
+        images_dir = tmpdir / "images"
+        images_dir.mkdir()
+        image1 = Path(page_image_path(str(images_dir), 1))
+        image2 = Path(page_image_path(str(images_dir), 2))
+        image1.write_bytes(b"png1")
+        image2.write_bytes(b"png2")
+
+        self.assertEqual(
+            collect_cached_image_paths(str(images_dir), [1, 2]),
+            [str(image1), str(image2)],
+        )
+        image2.unlink()
+        self.assertEqual(collect_cached_image_paths(str(images_dir), [1, 2]), [])
+
+    def test_load_metadata_report_round_trips_saved_json(self):
+        tmpdir = self.make_workspace_dir()
+        report = {
+            "raw_pdf_metadata": {"title": "Demo"},
+            "deterministic_inference": {"title": "Demo"},
+            "ai_inference": {"title": "Demo", "status": "ok", "error": None},
+        }
+        path = Path(tmpdir) / "demo_metadata.json"
+        path.write_text('{"raw_pdf_metadata":{"title":"Demo"},"deterministic_inference":{"title":"Demo"},"ai_inference":{"title":"Demo","status":"ok","error":null}}', encoding="utf-8")
+        self.assertEqual(load_metadata_report(tmpdir, "demo"), report)
+
+    def test_normalize_recorded_ai_metadata_preserves_status_and_error(self):
+        normalized = normalize_recorded_ai_metadata(
+            {"title": "Demo", "status": "empty", "error": "bad json"}
+        )
+        self.assertEqual(normalized["title"], "Demo")
+        self.assertEqual(normalized["status"], "empty")
+        self.assertEqual(normalized["error"], "bad json")
+
+    def test_redirect_pipeline_output_writes_standard_logs(self):
+        tmpdir = self.make_workspace_dir()
+        stdout_capture = io.StringIO()
+        stderr_capture = io.StringIO()
+
+        with redirect_pipeline_output(
+            tmpdir,
+            "demo",
+            stdout_stream=stdout_capture,
+            stderr_stream=stderr_capture,
+        ):
+            print("hello stdout")
+            print("hello stderr", file=sys.stderr)
+
+        stdout_log = Path(pipeline_stdout_log_path(tmpdir, "demo")).read_text(encoding="utf-8")
+        stderr_log = Path(pipeline_stderr_log_path(tmpdir, "demo")).read_text(encoding="utf-8")
+        self.assertIn("hello stdout", stdout_capture.getvalue())
+        self.assertIn("hello stderr", stderr_capture.getvalue())
+        self.assertIn("hello stdout", stdout_log)
+        self.assertIn("hello stderr", stderr_log)
 
     def test_should_reuse_cached_page_skips_explicit_retry_pages(self):
         tmpdir = Path(self.make_workspace_dir())
@@ -198,6 +322,22 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertIsNone(rights["death_year"])
         self.assertEqual(sources["author"], "ai_high")
 
+    def test_apply_manual_metadata_override_replaces_effective_and_rights_values(self):
+        effective, effective_sources, rights, right_sources = apply_manual_metadata_override(
+            {"title": "Auto Title", "author": "Auto Author", "publication_year": 1918},
+            {"title": "ai", "author": "ai", "publication_year": "structure"},
+            {"author": "Auto Author", "publication_year": 1918, "death_year": None},
+            {"author": "ai_high", "publication_year": "structure", "death_year": None},
+            {"title": "Manual Title", "author": "Manual Author", "publication_year": 1919},
+        )
+        self.assertEqual(effective["title"], "Manual Title")
+        self.assertEqual(effective["author"], "Manual Author")
+        self.assertEqual(effective["publication_year"], 1919)
+        self.assertEqual(effective_sources["title"], "manual_override")
+        self.assertEqual(rights["author"], "Manual Author")
+        self.assertEqual(rights["publication_year"], 1919)
+        self.assertEqual(right_sources["publication_year"], "manual_override")
+
     def test_split_latex_into_page_docs_preserves_document_wrapper(self):
         source = (
             "\\documentclass{article}\n"
@@ -272,6 +412,38 @@ class PipelineHelperTests(unittest.TestCase):
         prepared = prepare_latex_for_compile(source, compiler="pdflatex")
         self.assertIn("\\usepackage{tikz}", prepared)
 
+    def test_prepare_latex_for_compile_adds_amsmath_for_align_and_text(self):
+        source = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "\\begin{align*}\n"
+            "f(x) &= \\text{value} + \\dfrac{1}{2}\n"
+            "\\end{align*}\n"
+            "\\end{document}\n"
+        )
+        prepared = prepare_latex_for_compile(source, compiler="xelatex")
+        self.assertIn("\\usepackage{amsmath}", prepared)
+
+    def test_prepare_latex_for_compile_adds_amssymb_for_mathbb(self):
+        source = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "$\\mathbb{R} \\therefore x \\in \\varnothing$\n"
+            "\\end{document}\n"
+        )
+        prepared = prepare_latex_for_compile(source, compiler="xelatex")
+        self.assertIn("\\usepackage{amssymb}", prepared)
+
+    def test_prepare_latex_for_compile_adds_mathrsfs_for_mathscr(self):
+        source = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "$\\mathscr{L}(x)$\n"
+            "\\end{document}\n"
+        )
+        prepared = prepare_latex_for_compile(source, compiler="xelatex")
+        self.assertIn("\\usepackage{mathrsfs}", prepared)
+
     def test_prepare_latex_for_compile_adds_pdflatex_support_for_long_s(self):
         source = (
             "\\documentclass{article}\n"
@@ -310,6 +482,17 @@ class PipelineHelperTests(unittest.TestCase):
         )
         prepared = prepare_latex_for_compile(source, compiler="xelatex")
         self.assertIn("\\providecommand{\\longequal}{=}", prepared)
+
+    def test_prepare_latex_for_compile_defines_coloneqq_fallbacks(self):
+        source = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "$a \\coloneqq b, c \\eqqcolon d$\n"
+            "\\end{document}\n"
+        )
+        prepared = prepare_latex_for_compile(source, compiler="xelatex")
+        self.assertIn("\\providecommand{\\coloneqq}{\\mathrel{:=}}", prepared)
+        self.assertIn("\\providecommand{\\eqqcolon}{\\mathrel{=:}}", prepared)
 
     def test_request_http_options_uses_millisecond_timeout(self):
         options = _request_http_options()

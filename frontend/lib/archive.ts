@@ -1,5 +1,25 @@
 import type { ArchiveDocument, ArchivePage } from "@/lib/types";
 import { getSupabaseBaseUrl, getSupabaseReadClient } from "@/lib/supabase/server";
+export {
+  applyDocumentFilters,
+  buildEraSections,
+  filterDocuments,
+  getArchiveOverview,
+  getLanguageOptions,
+  getRightsLabel,
+  getTopAuthors,
+  getTopCenturies,
+  groupDocumentsByAuthor,
+  groupDocumentsByCentury,
+  normalizeBrowseSort,
+  sortDocuments,
+  type ArchiveBrowseSort,
+  type ArchiveEraSection,
+  type ArchiveFacet,
+  type ArchiveFilterOptions,
+  type ArchiveOverview,
+  type ArchiveYearBucket,
+} from "@/lib/archive-utils";
 
 const documentSelect =
   "id,slug,title,author_display,publication_year,century_label,language,journal_or_book,volume,issue,page_range,doi,summary,storage_bucket,source_pdf_path,digitalized_pdf_path,korean_pdf_path,cover_image_path,page_count,requested_page_count,rights_assessment,published_at,status";
@@ -88,37 +108,4 @@ export async function getDocumentPages(
     throw new Error(error.message);
   }
   return (data ?? []) as ArchivePage[];
-}
-
-export function filterDocuments(
-  documents: ArchiveDocument[],
-  query: string,
-): ArchiveDocument[] {
-  const q = query.trim().toLowerCase();
-  if (!q) {
-    return documents;
-  }
-  return documents.filter((document) =>
-    [document.title, document.author_display, document.journal_or_book, document.century_label]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(q)),
-  );
-}
-
-export function groupDocumentsByCentury(documents: ArchiveDocument[]) {
-  return documents.reduce<Record<string, ArchiveDocument[]>>((groups, document) => {
-    const key = document.century_label ?? "Undated";
-    groups[key] = groups[key] ?? [];
-    groups[key].push(document);
-    return groups;
-  }, {});
-}
-
-export function groupDocumentsByAuthor(documents: ArchiveDocument[]) {
-  return documents.reduce<Record<string, ArchiveDocument[]>>((groups, document) => {
-    const key = document.author_display ?? "Unknown author";
-    groups[key] = groups[key] ?? [];
-    groups[key].push(document);
-    return groups;
-  }, {});
 }

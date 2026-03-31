@@ -16,7 +16,14 @@ from datetime import datetime
 
 import streamlit as st
 
-from operations import build_operations_summary
+from operations import build_operations_summary, summarize_output_directory
+from publish import (
+    delete_metadata_override,
+    infer_output_name,
+    load_metadata_override,
+    metadata_override_path,
+    write_metadata_override,
+)
 from steps import compile_latex
 
 # ── 페이지 설정 ─────────────────────────────────────────────────
@@ -34,9 +41,25 @@ for key, default in {
     "publication_year_input": "",
     "death_year_input": "",
     "rights_meta_source": None,
+    "metadata_override_notice": None,
+    "metadata_editor_source": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+
+METADATA_OVERRIDE_FIELD_SPECS = (
+    ("title", "Title"),
+    ("author", "Author"),
+    ("publication_year", "Publication year"),
+    ("death_year", "Author death year"),
+    ("journal_or_book", "Journal or book"),
+    ("volume", "Volume"),
+    ("issue", "Issue"),
+    ("pages", "Pages"),
+    ("language", "Language"),
+    ("doi", "DOI"),
+)
 
 
 def _drain_pipeline_events():
@@ -70,15 +93,44 @@ def find_pipeline_state(output_path: Path):
     return read_json(state_files[0])
 
 
+def read_metadata_report(output_path: Path):
+    metadata_files = sorted(output_path.glob("*_metadata.json"))
+    if not metadata_files:
+        return None
+    return read_json(metadata_files[0])
+
+
+def get_output_name(output_path: Path):
+    try:
+        return infer_output_name(output_path)
+    except Exception:
+        return None
+
+
+def load_manual_metadata_override(output_path: Path):
+    output_name = get_output_name(output_path)
+    if not output_name:
+        return None, {}
+    return output_name, load_metadata_override(output_path, output_name)
+
+
+def refresh_metadata_editor_state(output_path: Path, overrides: dict):
+    source_key = str(output_path.resolve())
+    if st.session_state.get("metadata_editor_source") == source_key:
+        return
+    for field, _label in METADATA_OVERRIDE_FIELD_SPECS:
+        st.session_state[f"metadata_override_{field}"] = str(overrides.get(field) or "")
+    st.session_state["metadata_editor_source"] = source_key
+
+
 def read_rights_metadata(output_path: Path):
     metadata = {
         "author": "",
         "publication_year": "",
         "death_year": "",
     }
-    metadata_files = sorted(output_path.glob("*_metadata.json"))
-    if metadata_files:
-        data = read_json(metadata_files[0])
+    data = read_metadata_report(output_path)
+    if data:
         effective = data.get("effective_metadata", {}) if isinstance(data, dict) else {}
         rights = data.get("rights_metadata", {}) if isinstance(data, dict) else {}
         metadata["author"] = str(
@@ -110,6 +162,13 @@ def read_rights_metadata(output_path: Path):
             )
             else ""
         )
+    _output_name, override = load_manual_metadata_override(output_path)
+    if override.get("author"):
+        metadata["author"] = str(override.get("author"))
+    if override.get("publication_year") is not None:
+        metadata["publication_year"] = str(override.get("publication_year"))
+    if override.get("death_year") is not None:
+        metadata["death_year"] = str(override.get("death_year"))
     rights_files = sorted(output_path.glob("*_rights_check.json"))
     if rights_files:
         data = read_json(rights_files[0])
@@ -208,7 +267,6 @@ def _run_pipeline_thread(
 ):
     """파이프라인을 별도 스레드에서 실행하며 로그를 session_state에 기록."""
     import io
-    from contextlib import redirect_stdout, redirect_stderr
 
     # PDF를 임시 파일로 저장
     tmp_path = None
@@ -233,7 +291,7 @@ def _run_pipeline_thread(
         if project_dir not in sys.path:
             sys.path.insert(0, project_dir)
 
-        from pipeline import run_pipeline
+        from pipeline import redirect_pipeline_output, run_pipeline
 
         # stdout/stderr를 캡처하면서 session_state 로그에도 실시간 추가
         class LogCapture:
@@ -250,7 +308,12 @@ def _run_pipeline_thread(
                 return self
 
         capture = LogCapture(log_buf)
-        with redirect_stdout(capture), redirect_stderr(capture):
+        with redirect_pipeline_output(
+            output_dir,
+            paper_name,
+            stdout_stream=capture,
+            stderr_stream=capture,
+        ):
             run_pipeline(
                 input_path,
                 paper_name,
@@ -418,13 +481,14 @@ with st.expander("운영 요약", expanded=True):
     documents = operations_summary["documents"]
     if documents:
         counts = operations_summary["counts"]
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("결과 폴더", counts["total_outputs"])
         c2.metric("게시 완료", counts["published_outputs"])
         c3.metric("게시 대기", counts["ready_to_publish_outputs"])
         c4.metric("게시 실패", counts["publish_failed_outputs"])
         c5.metric("부분 완성", counts["partial_outputs"])
         c6.metric("리포트 없음", counts["missing_quality_reports"])
+        c7.metric("메타 검토", counts["metadata_review_outputs"])
 
         summary_rows = [
             {
@@ -433,6 +497,8 @@ with st.expander("운영 요약", expanded=True):
                 "페이지": item["total_pages"] or "-",
                 "실패 페이지": ", ".join(str(page) for page in item["failed_pages"]) or "-",
                 "게시": item["publish_status"],
+                "메타데이터 검토": item["metadata_review_summary"] or "-",
+                "게시 이슈": item["publish_issue_summary"] or "-",
                 "다음 작업": item["next_action"],
                 "최근 갱신": item["updated_at"] or "-",
             }
@@ -441,7 +507,10 @@ with st.expander("운영 요약", expanded=True):
         st.dataframe(summary_rows, hide_index=True, use_container_width=True)
 
         doc_labels = {
-            item["path"]: f"{item['folder_name']} [{item['publish_status']}] - {item['next_action']}"
+            item["path"]: (
+                f"{item['folder_name']} [{item['publish_status']}] - "
+                f"{item['publish_issue_summary'] or item['next_action']}"
+            )
             for item in documents
         }
         selected_output_dir = st.selectbox(
@@ -478,6 +547,14 @@ if not output_dir or not Path(output_dir).is_dir():
     st.stop()
 
 output_path = Path(output_dir)
+current_output_summary = None
+try:
+    current_output_summary = summarize_output_directory(output_path)
+except Exception:
+    current_output_summary = None
+current_output_name, current_metadata_override = load_manual_metadata_override(output_path)
+current_metadata_report = read_metadata_report(output_path) or {}
+refresh_metadata_editor_state(output_path, current_metadata_override)
 if uploaded is None:
     apply_rights_metadata(
         f"output:{output_path.resolve()}",
@@ -620,11 +697,117 @@ with tabs[2]:
 
 # ── 4. 품질 보고서 ──────────────────────────────────────────────
 with tabs[3]:
+    if st.session_state.get("metadata_override_notice"):
+        st.success(st.session_state["metadata_override_notice"])
+        st.session_state["metadata_override_notice"] = None
+
     if report:
         st.json(report)
         download_btn(report_files[0], "품질 보고서 다운로드")
     else:
         st.info("품질 보고서 파일이 없습니다.")
+
+    if current_output_summary and current_output_summary.get("metadata_review_rows"):
+        st.subheader("메타데이터 검토")
+        review_rows = [
+            {
+                "필드": row["label"],
+                "최종 값": row["effective_value"] or "-",
+                "최종 소스": row["effective_source"] or "-",
+                "AI 값": row["ai_value"] or "-",
+                "AI 신뢰도": row["ai_confidence"],
+                "근거": row["ai_evidence"] or "-",
+                "수동 보정": row["manual_override_value"] or "-",
+                "검토 필요": "Yes" if row["review_needed"] else "-",
+            }
+            for row in current_output_summary["metadata_review_rows"]
+        ]
+        st.dataframe(review_rows, hide_index=True, use_container_width=True)
+
+    if current_output_name:
+        st.subheader("수동 메타데이터 보정")
+        st.caption(
+            "여기서 저장한 값은 `[name]_metadata_override.json`에 기록되고, 운영 요약과 publish에서 즉시 우선 적용됩니다."
+        )
+        st.caption(f"Override file: {metadata_override_path(output_path, current_output_name)}")
+        effective_metadata = (
+            current_metadata_report.get("effective_metadata")
+            if isinstance(current_metadata_report.get("effective_metadata"), dict)
+            else {}
+        )
+        effective_sources = (
+            current_metadata_report.get("effective_sources")
+            if isinstance(current_metadata_report.get("effective_sources"), dict)
+            else {}
+        )
+        with st.form("manual_metadata_override_form"):
+            left_col, right_col = st.columns(2)
+            for index, (field, label) in enumerate(METADATA_OVERRIDE_FIELD_SPECS):
+                column = left_col if index % 2 == 0 else right_col
+                current_value = effective_metadata.get(field)
+                current_source = effective_sources.get(field) or "-"
+                with column:
+                    st.text_input(
+                        label,
+                        key=f"metadata_override_{field}",
+                        placeholder=str(current_value) if current_value is not None else "",
+                    )
+                    st.caption(
+                        f"Current: {current_value if current_value is not None else '-'} ({current_source})"
+                    )
+            save_override_clicked = st.form_submit_button(
+                "수동 보정 저장",
+                type="primary",
+                width="stretch",
+            )
+
+        override_file_exists = Path(
+            metadata_override_path(output_path, current_output_name)
+        ).exists()
+        clear_override_clicked = st.button(
+            "보정 파일 제거",
+            disabled=not override_file_exists,
+            width="stretch",
+        )
+
+        if save_override_clicked:
+            override_inputs = {
+                field: st.session_state.get(f"metadata_override_{field}", "")
+                for field, _label in METADATA_OVERRIDE_FIELD_SPECS
+            }
+            if any(str(value).strip() for value in override_inputs.values()):
+                override_path_value = write_metadata_override(
+                    output_path,
+                    current_output_name,
+                    override_inputs,
+                )
+                st.session_state["metadata_override_notice"] = (
+                    f"수동 메타데이터 보정을 저장했습니다: {override_path_value}"
+                )
+            else:
+                removed_path = delete_metadata_override(output_path, current_output_name)
+                st.session_state["metadata_override_notice"] = (
+                    f"수동 메타데이터 보정을 제거했습니다: {removed_path}"
+                    if removed_path
+                    else "저장된 수동 메타데이터 보정이 없었습니다."
+                )
+            st.session_state["metadata_editor_source"] = None
+            st.session_state["rights_meta_source"] = None
+            st.rerun()
+
+        if clear_override_clicked:
+            removed_path = delete_metadata_override(output_path, current_output_name)
+            st.session_state["metadata_override_notice"] = (
+                f"수동 메타데이터 보정을 제거했습니다: {removed_path}"
+                if removed_path
+                else "저장된 수동 메타데이터 보정이 없었습니다."
+            )
+            st.session_state["metadata_editor_source"] = None
+            st.session_state["rights_meta_source"] = None
+            st.rerun()
+    else:
+        st.info("수동 메타데이터 보정을 하려면 output 이름을 추론할 수 있어야 합니다.")
+
     if publish_report:
         st.subheader("게시 리포트")
         st.json(publish_report)

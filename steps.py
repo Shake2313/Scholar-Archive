@@ -196,15 +196,16 @@ def _check_pdf_prereqs() -> dict:
     }
 
 
-def _check_latex_prereqs() -> dict:
+def _check_latex_prereqs(required_compilers: tuple[str, ...] = ("pdflatex", "xelatex")) -> dict:
     _ensure_latex_on_path()
-    pdflatex = shutil.which("pdflatex")
-    xelatex = shutil.which("xelatex")
+    available = {
+        "pdflatex": shutil.which("pdflatex"),
+        "xelatex": shutil.which("xelatex"),
+    }
     missing = []
-    if not pdflatex:
-        missing.append("pdflatex")
-    if not xelatex:
-        missing.append("xelatex")
+    for compiler in required_compilers:
+        if not available.get(compiler):
+            missing.append(compiler)
     if missing:
         return {
             "name": "latex",
@@ -218,17 +219,24 @@ def _check_latex_prereqs() -> dict:
     return {
         "name": "latex",
         "status": "ok",
-        "message": "pdflatex and xelatex detected.",
+        "message": ", ".join(required_compilers) + " detected.",
     }
 
 
-def run_preflight_checks() -> dict:
+def run_preflight_checks(
+    *,
+    needs_genai: bool = True,
+    needs_pdf: bool = True,
+    latex_compilers: tuple[str, ...] = ("pdflatex", "xelatex"),
+) -> dict:
     """Collect lightweight environment checks before long pipeline work starts."""
-    checks = [
-        _check_genai_prereqs(),
-        _check_pdf_prereqs(),
-        _check_latex_prereqs(),
-    ]
+    checks = []
+    if needs_genai:
+        checks.append(_check_genai_prereqs())
+    if needs_pdf:
+        checks.append(_check_pdf_prereqs())
+    if latex_compilers:
+        checks.append(_check_latex_prereqs(required_compilers=latex_compilers))
     ok = not any(check["status"] == "error" for check in checks)
     return {"ok": ok, "checks": checks}
 
@@ -673,9 +681,18 @@ def _normalize_decimal_cdots_in_text(source: str) -> str:
     return re.sub(r"(?<!\$)(\d)\\cdot(?=\d)", r"\1$\\cdot$", source)
 
 
+def _has_package(source: str, package: str) -> bool:
+    return bool(
+        re.search(
+            rf"\\usepackage(?:\[[^\]]*\])?\{{[^}}]*\b{re.escape(package)}\b[^}}]*\}}",
+            source,
+        )
+    )
+
+
 def _ensure_graphicx_for_box_commands(source: str) -> str:
     """Load graphicx when scaling or image commands are present."""
-    if "\\usepackage{graphicx}" in source:
+    if _has_package(source, "graphicx"):
         return source
     if not re.search(r"\\(?:includegraphics|scalebox|resizebox|rotatebox|reflectbox)\b", source):
         return source
@@ -684,7 +701,7 @@ def _ensure_graphicx_for_box_commands(source: str) -> str:
 
 def _ensure_wrapfig_for_wrapped_floats(source: str) -> str:
     """Load wrapfig when wrapfigure or wraptable environments are present."""
-    if "\\usepackage{wrapfig}" in source:
+    if _has_package(source, "wrapfig"):
         return source
     if "\\begin{wrapfigure}" not in source and "\\begin{wraptable}" not in source:
         return source
@@ -693,11 +710,47 @@ def _ensure_wrapfig_for_wrapped_floats(source: str) -> str:
 
 def _ensure_tikz_for_tikzpicture(source: str) -> str:
     """Load TikZ when tikzpicture environments are present."""
-    if "\\usepackage{tikz}" in source:
+    if _has_package(source, "tikz"):
         return source
     if "\\begin{tikzpicture}" not in source:
         return source
     return _insert_before_document(source, "\\usepackage{tikz}")
+
+
+def _ensure_amsmath_for_math_constructs(source: str) -> str:
+    """Load amsmath when translated math uses environments/macros it defines."""
+    if _has_package(source, "amsmath"):
+        return source
+    if not re.search(
+        r"\\(?:begin\{(?:align\*?|gather\*?|multline\*?|cases|split|aligned|gathered)\}"
+        r"|text\b|dfrac\b|tfrac\b|eqref\b|tag\b|substack\b|overset\b|underset\b"
+        r"|xrightarrow\b|xleftarrow\b|operatorname\b|boxed\b)",
+        source,
+    ):
+        return source
+    return _insert_before_document(source, "\\usepackage{amsmath}")
+
+
+def _ensure_amssymb_for_math_symbols(source: str) -> str:
+    """Load amssymb when translated math emits AMS symbol/font macros."""
+    if _has_package(source, "amssymb"):
+        return source
+    if not re.search(
+        r"\\(?:mathbb\b|mathfrak\b|therefore\b|because\b|square\b|blacksquare\b"
+        r"|triangleq\b|lesssim\b|gtrsim\b|leqslant\b|geqslant\b|varnothing\b)",
+        source,
+    ):
+        return source
+    return _insert_before_document(source, "\\usepackage{amssymb}")
+
+
+def _ensure_mathrsfs_for_mathscr(source: str) -> str:
+    """Load mathrsfs when OCR/translation uses \\mathscr."""
+    if _has_package(source, "mathrsfs"):
+        return source
+    if "\\mathscr" not in source:
+        return source
+    return _insert_before_document(source, "\\usepackage{mathrsfs}")
 
 
 def _ensure_longequal_macro(source: str) -> str:
@@ -707,6 +760,23 @@ def _ensure_longequal_macro(source: str) -> str:
     if "\\providecommand{\\longequal}" in source or "\\newcommand{\\longequal}" in source:
         return source
     return _insert_before_document(source, "\\providecommand{\\longequal}{=}")
+
+
+def _ensure_coloneqq_macros(source: str) -> str:
+    """Provide simple fallbacks for colon-equals macros often used in translated math."""
+    if (
+        "\\coloneqq" not in source
+        and "\\eqqcolon" not in source
+        and "\\Coloneqq" not in source
+        and "\\Eqqcolon" not in source
+    ):
+        return source
+    if "\\providecommand{\\coloneqq}" in source or "\\newcommand{\\coloneqq}" in source:
+        return source
+    source = _insert_before_document(source, "\\providecommand{\\coloneqq}{\\mathrel{:=}}")
+    source = _insert_before_document(source, "\\providecommand{\\eqqcolon}{\\mathrel{=:}}")
+    source = _insert_before_document(source, "\\providecommand{\\Coloneqq}{\\mathrel{::=}}")
+    return _insert_before_document(source, "\\providecommand{\\Eqqcolon}{\\mathrel{=::}}")
 
 
 def _ensure_pdflatex_unicode_support(source: str) -> str:
@@ -781,7 +851,11 @@ def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
     prepared = _ensure_graphicx_for_box_commands(prepared)
     prepared = _ensure_wrapfig_for_wrapped_floats(prepared)
     prepared = _ensure_tikz_for_tikzpicture(prepared)
+    prepared = _ensure_amsmath_for_math_constructs(prepared)
+    prepared = _ensure_amssymb_for_math_symbols(prepared)
+    prepared = _ensure_mathrsfs_for_mathscr(prepared)
     prepared = _ensure_longequal_macro(prepared)
+    prepared = _ensure_coloneqq_macros(prepared)
     if compiler == "pdflatex":
         prepared = _ensure_pdflatex_unicode_support(prepared)
     else:

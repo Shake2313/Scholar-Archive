@@ -48,6 +48,12 @@ Logging rule:
 
 \- If several small edits belong to one coherent outcome, combine them into a single Notion log.
 
+\- If you are still working on the same task, outcome, or checklist item, update the existing Dev Log entry instead of creating a new one.
+
+\- If the topic changes to a different task, bug, checklist item, or deliverable, create a new Dev Log entry instead of overwriting the previous one.
+
+\- If you are unsure whether it is still the same topic, prefer creating a new Dev Log entry.
+
 
 
 Where to write:
