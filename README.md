@@ -175,6 +175,20 @@ cd frontend
 npm run build
 ```
 
+## 운영 기록
+
+Scholar Archive 작업에서 의미 있는 진전이 생기면 Notion에 개발 일지를 남긴다.
+
+- 기준 문서: `Notion_Instruction.md`
+- 기본 위치: Notion `Dev Log` 데이터베이스
+- 상태 변경 추적: 필요 시 Notion `Tasks` 데이터베이스
+- 기록 대상: 코드/설정/스키마/프롬프트/파이프라인 구조 변경, 버그 수정, blocker 해소, 의미 있는 결과물 생성, 이후 판단에 영향을 주는 실패
+- 기록 제외: 사소한 재시도, 미세한 문구 수정, 결과 없는 탐색, 같은 작업의 중복 로그
+- 기록 방식: 작은 로그 여러 개보다 의미 있는 작업 단위 하나로 묶어 작성하고, outcome 중심으로 간결하게 남긴다
+
+Notion 기록이 필요한지 애매하면 "나중에 다시 봤을 때 남겨 둘 가치가 있는가?"를 기준으로 판단한다.
+
 ## 다음 참고
 
 현재 작업 우선순위와 완료 이력은 [CODEX_CHECKLIST.md](C:/Users/박수인/Desktop/백업/Coding/Scholar%20Archive/CODEX_CHECKLIST.md)에 정리한다.
+Notion 기록 원칙은 [Notion_Instruction.md](C:/Users/박수인/Desktop/백업/Coding/Scholar%20Archive/Notion_Instruction.md)를 따른다.

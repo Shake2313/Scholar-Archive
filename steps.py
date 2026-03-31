@@ -700,6 +700,15 @@ def _ensure_tikz_for_tikzpicture(source: str) -> str:
     return _insert_before_document(source, "\\usepackage{tikz}")
 
 
+def _ensure_longequal_macro(source: str) -> str:
+    """Define \\longequal when OCR/translation emits it without a package."""
+    if "\\longequal" not in source:
+        return source
+    if "\\providecommand{\\longequal}" in source or "\\newcommand{\\longequal}" in source:
+        return source
+    return _insert_before_document(source, "\\providecommand{\\longequal}{=}")
+
+
 def _ensure_pdflatex_unicode_support(source: str) -> str:
     """Inject minimal Unicode declarations needed for historical glyphs under pdfLaTeX."""
     if "ſ" not in source:
@@ -772,6 +781,7 @@ def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
     prepared = _ensure_graphicx_for_box_commands(prepared)
     prepared = _ensure_wrapfig_for_wrapped_floats(prepared)
     prepared = _ensure_tikz_for_tikzpicture(prepared)
+    prepared = _ensure_longequal_macro(prepared)
     if compiler == "pdflatex":
         prepared = _ensure_pdflatex_unicode_support(prepared)
     else:

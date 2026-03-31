@@ -301,6 +301,16 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertNotIn("\\DeclareUnicodeCharacter{017F}{\\textlongs}", prepared)
         self.assertIn("\\DeclareTextSymbol{\\textlongs}{TS1}{116}", prepared)
 
+    def test_prepare_latex_for_compile_defines_longequal_when_missing(self):
+        source = (
+            "\\documentclass{article}\n"
+            "\\begin{document}\n"
+            "$a \\longequal b$\n"
+            "\\end{document}\n"
+        )
+        prepared = prepare_latex_for_compile(source, compiler="xelatex")
+        self.assertIn("\\providecommand{\\longequal}{=}", prepared)
+
     def test_request_http_options_uses_millisecond_timeout(self):
         options = _request_http_options()
         self.assertEqual(options.timeout, 180000)
