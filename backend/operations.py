@@ -5,6 +5,7 @@ Helpers for summarizing pipeline outputs for operations workflows.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -294,6 +295,75 @@ def _metadata_review_from_report(
     }
 
 
+def _rights_assessment_label(assessment: str | None) -> str:
+    if assessment == "likely_public_domain_us":
+        return "Likely public domain (US)"
+    if assessment == "likely_public_domain_life_plus_70":
+        return "Likely public domain (life+70)"
+    return "Rights uncertain"
+
+
+def _rights_review_from_report(
+    metadata_report: dict[str, Any] | None,
+    rights_report: dict[str, Any] | None,
+) -> dict[str, Any]:
+    report = metadata_report if isinstance(metadata_report, dict) else {}
+    rights_info = rights_report if isinstance(rights_report, dict) else {}
+    rights_sources = (
+        report.get("rights_sources") if isinstance(report.get("rights_sources"), dict) else {}
+    )
+
+    assessment = _clean_text(rights_info.get("assessment")) or "unknown"
+    reason = _clean_text(rights_info.get("reason"))
+    source_summary = _clean_text(rights_info.get("source_summary"))
+    warnings = rights_info.get("warnings") if isinstance(rights_info.get("warnings"), list) else []
+    warnings = [_clean_text(item) for item in warnings]
+    warnings = [item for item in warnings if item]
+
+    if source_summary is None and rights_sources:
+        source_parts = []
+        for field in ("author", "publication_year", "death_year"):
+            source = _clean_text(rights_sources.get(field))
+            if source:
+                source_parts.append(f"{METADATA_FIELD_LABELS.get(field, field)}={source}")
+        source_summary = ", ".join(source_parts) if source_parts else None
+
+    inferred_review = False
+    if any(_clean_text(rights_sources.get(field)) == "ai_high" for field in ("author", "publication_year", "death_year")):
+        inferred_review = True
+    raw_needs_manual_review = rights_info.get("needs_manual_review")
+    if isinstance(raw_needs_manual_review, bool):
+        needs_manual_review = raw_needs_manual_review
+    else:
+        needs_manual_review = inferred_review or (
+            assessment == "unknown" and bool(source_summary or reason or warnings)
+        )
+
+    summary = None
+    assessment_label = _rights_assessment_label(assessment)
+    if needs_manual_review:
+        summary = f"Review required: {assessment_label}"
+        if source_summary:
+            summary += f" ({source_summary})"
+    elif assessment != "unknown":
+        summary = assessment_label
+    elif reason:
+        summary = reason
+
+    if warnings:
+        warning_suffix = warnings[0]
+        summary = f"{summary}; {warning_suffix}" if summary else warning_suffix
+
+    return {
+        "rights_assessment": assessment,
+        "rights_reason": reason,
+        "rights_needs_manual_review": needs_manual_review,
+        "rights_source_summary": source_summary,
+        "rights_warning_rows": warnings,
+        "rights_review_summary": summary,
+    }
+
+
 def _publish_issue_from_report(publish_report: dict[str, Any] | None) -> dict[str, str | None]:
     report = publish_report if isinstance(publish_report, dict) else {}
     status = str(report.get("status") or "missing")
@@ -361,6 +431,90 @@ def _publish_issue_from_report(publish_report: dict[str, Any] | None) -> dict[st
     }
 
 
+def _normalize_compile_warning(line: str) -> str | None:
+    text = line.strip()
+    if not text:
+        return None
+    if text.startswith("Overfull \\hbox"):
+        return "Overfull hbox"
+    if text.startswith("Underfull \\hbox"):
+        return "Underfull hbox"
+    if text.startswith("Missing character:"):
+        return "Missing character"
+    package_warning = re.match(r"^Package ([^\s]+) Warning:\s*(.+)$", text)
+    if package_warning:
+        package_name, message = package_warning.groups()
+        message = re.sub(r"\s+on input line \d+\.?$", "", message).strip()
+        return f"{package_name} warning: {message}"
+    latex_warning = re.match(r"^LaTeX Warning:\s*(.+)$", text)
+    if latex_warning:
+        message = re.sub(r"\s+on input line \d+\.?$", "", latex_warning.group(1)).strip()
+        return f"LaTeX warning: {message}"
+    package_info = re.match(r"^Package ([^\s]+) Info:\s*(.+ is missing)\s*$", text)
+    if package_info:
+        package_name, message = package_info.groups()
+        return f"{package_name} info: {message}"
+    return None
+
+
+def _truncate_summary_text(value: str, max_length: int = 96) -> str:
+    return value if len(value) <= max_length else value[: max_length - 3].rstrip() + "..."
+
+
+def _compile_warnings_from_output(output_path: Path) -> dict[str, Any]:
+    patterns = (
+        ("*_digitalized.log", "digitalized", "warning"),
+        ("*_Korean.log", "korean", "warning"),
+        ("*_digitalized_error.log", "digitalized", "error"),
+        ("*_Korean_error.log", "korean", "error"),
+    )
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+
+    for glob_pattern, target, severity in patterns:
+        for path in sorted(output_path.glob(glob_pattern)):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for line in lines:
+                normalized = _normalize_compile_warning(line)
+                if normalized is None:
+                    continue
+                key = (target, severity, normalized)
+                row = grouped.setdefault(
+                    key,
+                    {
+                        "target": target,
+                        "severity": severity,
+                        "message": normalized,
+                        "count": 0,
+                        "path": str(path.resolve()),
+                    },
+                )
+                row["count"] += 1
+
+    rows = sorted(
+        grouped.values(),
+        key=lambda item: (
+            0 if item["severity"] == "error" else 1,
+            -item["count"],
+            item["target"],
+            item["message"],
+        ),
+    )
+    summary = None
+    if rows:
+        summary = ", ".join(
+            f"{item['target']}: {_truncate_summary_text(item['message'])} x{item['count']}"
+            for item in rows[:3]
+        )
+    return {
+        "compile_warning_count": sum(item["count"] for item in rows),
+        "compile_warning_rows": rows,
+        "compile_warning_summary": summary,
+    }
+
+
 def _next_action(summary: dict[str, Any]) -> str:
     if summary["hung_suspected"]:
         return "Inspect hung pipeline"
@@ -372,6 +526,8 @@ def _next_action(summary: dict[str, Any]) -> str:
         return "Run pipeline"
     if not summary["digitalized_compiled"] or not summary["korean_compiled"]:
         return "Fix PDF compilation"
+    if summary.get("rights_needs_manual_review"):
+        return "Review rights metadata"
     if summary.get("publish_issue_type") == "missing_file":
         return "Fix publish inputs"
     if summary.get("publish_issue_type") in {"dns", "api"}:
@@ -396,13 +552,17 @@ def _priority_rank(summary: dict[str, Any]) -> int:
         return 3
     if not summary["digitalized_compiled"] or not summary["korean_compiled"]:
         return 4
+    if summary.get("rights_needs_manual_review"):
+        return 5
     if summary.get("publish_issue_type") in {"missing_file", "dns", "api", "auth", "credentials"}:
-        return 5
-    if summary["publish_status"] == "failed":
-        return 5
-    if summary["publish_status"] != "published":
         return 6
-    return 7
+    if summary["publish_status"] == "failed":
+        return 6
+    if summary.get("compile_warning_count"):
+        return 7
+    if summary["publish_status"] != "published":
+        return 7
+    return 8
 
 
 def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
@@ -414,8 +574,11 @@ def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
     publish_report_path, publish_report = _first_report(output_path, "*_publish_report.json")
     pipeline_state_path, pipeline_state = _first_report(output_path, "*_pipeline_state.json")
     metadata_report_path, metadata_report = _first_report(output_path, "*_metadata.json")
+    rights_report_path, rights_report = _first_report(output_path, "*_rights_check.json")
     metadata_override_report_path, metadata_override = _load_metadata_override(output_path)
     metadata_review = _metadata_review_from_report(metadata_report, metadata_override)
+    rights_review = _rights_review_from_report(metadata_report, rights_report)
+    compile_warning_review = _compile_warnings_from_output(output_path)
 
     failed_pages = _extract_failed_pages(quality_report, pipeline_state)
     requested_pages = _coerce_page_numbers((pipeline_state or {}).get("requested_pages"))
@@ -468,6 +631,7 @@ def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
         "publish_report_path": str(publish_report_path.resolve()) if publish_report_path else None,
         "pipeline_state_path": str(pipeline_state_path.resolve()) if pipeline_state_path else None,
         "metadata_report_path": str(metadata_report_path.resolve()) if metadata_report_path else None,
+        "rights_report_path": str(rights_report_path.resolve()) if rights_report_path else None,
         "metadata_override_path": (
             str(metadata_override_report_path.resolve())
             if metadata_override_report_path
@@ -475,6 +639,8 @@ def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
         ),
         "metadata_override_fields": sorted(metadata_override),
         **metadata_review,
+        **rights_review,
+        **compile_warning_review,
         "total_pages": total_pages,
         "successful_pages": successful_page_count,
         "failed_pages": failed_pages,
@@ -546,6 +712,8 @@ def build_operations_summary(output_root: str | Path) -> dict[str, Any]:
             "ready_to_publish_outputs": sum(1 for item in documents if item["publish_ready"]),
             "publish_failed_outputs": sum(1 for item in documents if item["publish_status"] == "failed"),
             "metadata_review_outputs": sum(1 for item in documents if item["metadata_review_needed"]),
+            "rights_review_outputs": sum(1 for item in documents if item["rights_needs_manual_review"]),
+            "compile_warning_outputs": sum(1 for item in documents if item["compile_warning_count"]),
             "partial_outputs": sum(1 for item in documents if item["partial_output"]),
             "hung_suspected_outputs": sum(1 for item in documents if item["hung_suspected"]),
             "missing_quality_reports": sum(1 for item in documents if not item["has_quality_report"]),

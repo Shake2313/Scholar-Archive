@@ -332,6 +332,34 @@ code {
   font-size: 0.88rem;
 }
 
+.documentMetaList {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(62, 45, 22, 0.1);
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.documentMetaRow {
+  display: grid;
+  gap: 4px;
+}
+
+.documentMetaRow dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.documentMetaRow dd {
+  margin: 0;
+  font-size: 0.92rem;
+  word-break: break-word;
+}
+
 .documentPill {
   padding: 6px 10px;
   border-radius: 999px;
@@ -371,13 +399,18 @@ code {
 .catalogFilters {
   display: grid;
   gap: 14px;
-  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(150px, 1fr)) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-top: 20px;
+  align-items: end;
 }
 
 .catalogFilterField {
   display: grid;
   gap: 8px;
+}
+
+.catalogFilterFieldWide {
+  grid-column: span 2;
 }
 
 .catalogFilterField label {
@@ -402,11 +435,25 @@ code {
 .catalogFilterActions {
   display: flex;
   align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
 }
 
 .catalogFilterActions button {
   min-height: 50px;
   padding: 0 18px;
+}
+
+.catalogResetLink {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.58);
 }
 
 .timelineNav {
@@ -504,6 +551,14 @@ code {
   padding: 22px;
 }
 
+.viewerSidebarCard h2,
+.viewerPanelHeader h2,
+.viewerTextCardHeader h2 {
+  margin: 0;
+  font-family: var(--font-display), serif;
+  line-height: 1;
+}
+
 .viewerBackLink {
   display: inline-flex;
   margin-bottom: 14px;
@@ -537,6 +592,8 @@ code {
 .pageIndexList {
   display: grid;
   gap: 8px;
+  max-height: 48vh;
+  overflow: auto;
 }
 
 .pageIndexButton,
@@ -544,6 +601,30 @@ code {
   padding: 10px 14px;
   color: inherit;
   font: inherit;
+}
+
+.pageIndexButton {
+  display: grid;
+  gap: 8px;
+  text-align: left;
+}
+
+.pageIndexButtonTop {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.pageIndexButtonTop small {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.pageIndexSnippet {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.5;
 }
 
 .viewerMain {
@@ -564,11 +645,49 @@ code {
   flex-wrap: wrap;
 }
 
+.viewerToolbarGroup {
+  display: grid;
+  gap: 10px;
+}
+
+.viewerStatusRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.viewerStatusPill {
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(62, 45, 22, 0.12);
+  background: rgba(255, 255, 255, 0.64);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .viewerPageControls {
   display: flex;
   gap: 10px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+.viewerPageJump {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.viewerPageJump select {
+  min-width: 150px;
+  min-height: 42px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.72);
+  color: inherit;
+  font: inherit;
 }
 
 .viewerPageLabel {
@@ -593,6 +712,50 @@ code {
 }
 
 .viewerImagePanel {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  overflow: auto;
+}
+
+.viewerImagePanel.isDetail img {
+  width: auto;
+  max-width: none;
+  min-width: 100%;
+}
+
+.viewerTextPanel {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  overflow: auto;
+}
+
+.viewerPanelHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.viewerInlineActions,
+.viewerInlineMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.viewerInlineMeta {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.viewerUtilityLink {
+  white-space: nowrap;
+}
+
+.viewerImageStage {
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -605,12 +768,52 @@ code {
   border: 1px solid rgba(48, 37, 24, 0.12);
 }
 
+.viewerTextCompareGrid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.viewerTextCard {
+  display: grid;
+  gap: 14px;
+  min-height: 0;
+}
+
+.viewerTextCardHeader {
+  display: grid;
+  gap: 8px;
+}
+
+.viewerTextCardBody {
+  min-height: 0;
+}
+
 .viewerTextPanel pre {
   margin: 0;
   white-space: pre-wrap;
   font-family: var(--font-body), serif;
   font-size: 0.98rem;
   line-height: 1.8;
+}
+
+.viewerSidebarNotes {
+  display: grid;
+  gap: 10px;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.viewerSidebarNotes p {
+  margin: 0;
+}
+
+.viewerPageRailHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 14px;
 }
 
 .emptyState,
@@ -627,7 +830,8 @@ code {
   .viewerPanels,
   .heroPanel,
   .spotlightGrid,
-  .catalogFilters {
+  .catalogFilters,
+  .viewerTextCompareGrid {
     grid-template-columns: 1fr;
   }
 
@@ -635,8 +839,10 @@ code {
     position: static;
   }
 
-  .catalogFilterActions {
+  .catalogFilterActions,
+  .viewerPanelHeader {
     align-items: stretch;
+    flex-direction: column;
   }
 }
 

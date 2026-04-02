@@ -92,7 +92,7 @@ def main() -> None:
         import psycopg
     except Exception as exc:
         raise SystemExit(
-            "psycopg is not installed. Run `python -m pip install -r requirements.txt` first."
+            "psycopg is not installed. Run `python -m pip install -r backend/requirements.txt` first."
         ) from exc
 
     connect_kwargs = _parse_database_url(database_url)

@@ -18,6 +18,10 @@ from pathlib import Path
 from typing import Any
 from urllib import error, parse, request
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -59,19 +63,6 @@ MANUAL_METADATA_FIELDS = (
     "language",
     "doi",
 )
-
-
-def publish_report_path(output_dir: str, name: str) -> str:
-    return os.path.join(output_dir, f"{name}_publish_report.json")
-
-
-def save_publish_report(output_dir: str, name: str, report: dict) -> str:
-    path = publish_report_path(output_dir, name)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-    return path
-
-
 def get_supabase_url() -> str | None:
     return os.environ.get("SUPABASE_URL") or os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
 
@@ -405,29 +396,71 @@ def infer_metadata_from_structure_json(structure_json: str) -> dict:
     }
 
 
+def _summarize_rights_sources(sources: dict[str, Any] | None) -> str | None:
+    if not isinstance(sources, dict):
+        return None
+    parts = []
+    for field in ("author", "publication_year", "death_year"):
+        source = _clean_metadata_value(sources.get(field))
+        if source:
+            parts.append(f"{field}={source}")
+    return ", ".join(parts) if parts else None
+
+
 def assess_rights(
     author: str | None,
     publication_year: int | None,
     death_year: int | None,
+    *,
+    sources: dict[str, Any] | None = None,
 ) -> dict:
     current_year = datetime.now().year
+    author_source = _clean_metadata_value((sources or {}).get("author"))
+    publication_year_source = _clean_metadata_value((sources or {}).get("publication_year"))
+    death_year_source = _clean_metadata_value((sources or {}).get("death_year"))
+    source_summary = _summarize_rights_sources(sources)
+    warnings: list[str] = []
+    if publication_year is not None and publication_year > current_year:
+        warnings.append("Publication year is in the future.")
+    if death_year is not None and death_year > current_year:
+        warnings.append("Author death year is in the future.")
     result = {
         "author": author,
         "publication_year": publication_year,
         "death_year": death_year,
         "assessment": "unknown",
         "reason": "Insufficient metadata.",
+        "basis": None,
+        "needs_manual_review": False,
+        "source_summary": source_summary,
+        "warnings": warnings,
     }
+    if warnings:
+        result["needs_manual_review"] = True
+        result["reason"] = warnings[0]
+        return result
     if publication_year is not None and publication_year <= 1929:
         result["assessment"] = "likely_public_domain_us"
         result["reason"] = "Publication year is 1929 or earlier (US heuristic)."
+        result["basis"] = "publication_year"
+        if publication_year_source == "ai_high":
+            result["needs_manual_review"] = True
+            result["reason"] += " Publication year came from AI-inferred metadata; confirm manually."
         return result
     if death_year is not None and current_year - death_year >= 70:
         result["assessment"] = "likely_public_domain_life_plus_70"
         result["reason"] = "Author death year is at least 70 years ago."
+        result["basis"] = "death_year"
+        if death_year_source == "ai_high" or author_source in {"ai_high", "pdf"} or not author:
+            result["needs_manual_review"] = True
+            result["reason"] += " Death year or author identity came from inferred/embedded metadata; confirm manually."
         return result
     if publication_year is not None:
         result["reason"] = "Publication year alone was not enough for this heuristic."
+        result["needs_manual_review"] = True
+    elif death_year is not None:
+        result["reason"] = "Death year alone was not enough for this heuristic."
+        result["needs_manual_review"] = True
     return result
 
 
@@ -636,6 +669,11 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
     rights_info = _load_json_if_exists(base / f"{name}_rights_check.json")
     layout_profile = _load_json_if_exists(base / f"{name}_layout_profile.json")
     manual_override = load_metadata_override(output_dir, name)
+    rights_sources = (
+        metadata_report.get("rights_sources")
+        if isinstance(metadata_report.get("rights_sources"), dict)
+        else {}
+    )
 
     source_pdf = str(source_pdf_path) if source_pdf_path.exists() else ""
     raw_pdf_metadata = metadata_report.get("raw_pdf_metadata") or (
@@ -651,15 +689,18 @@ def build_publish_bundle_from_existing_output(*, output_dir: str, name: str) -> 
     )
     effective_metadata = apply_metadata_override(effective_metadata, manual_override)
 
+    reassessed_rights = assess_rights(
+        effective_metadata.get("author"),
+        effective_metadata.get("publication_year"),
+        effective_metadata.get("death_year"),
+        sources=rights_sources,
+    )
     if not rights_info:
-        rights_info = assess_rights(
-            effective_metadata.get("author"),
-            effective_metadata.get("publication_year"),
-            effective_metadata.get("death_year"),
-        )
+        rights_info = reassessed_rights
     else:
         rights_info = {
             **rights_info,
+            **reassessed_rights,
             "author": effective_metadata.get("author"),
             "publication_year": effective_metadata.get("publication_year"),
             "death_year": effective_metadata.get("death_year"),
@@ -821,6 +862,10 @@ def build_publish_bundle(
             "death_year": rights_info.get("death_year"),
             "assessment": rights_info.get("assessment"),
             "reason": rights_info.get("reason"),
+            "basis": rights_info.get("basis"),
+            "needs_manual_review": rights_info.get("needs_manual_review"),
+            "source_summary": rights_info.get("source_summary"),
+            "warnings": rights_info.get("warnings") or [],
         },
         "layout_profile": layout_profile or {},
     }
@@ -1098,172 +1143,10 @@ def publish_bundle_to_supabase(
     }
 
 
-def build_dry_run_publish_report(bundle: dict) -> dict:
-    return {
-        "status": "dry_run",
-        "reason": None,
-        "slug": bundle["document"]["slug"],
-        "storage_bucket": bundle["storage_bucket"],
-        "storage_root": bundle["storage_root"],
-        "uploaded_assets": len(bundle["assets"]),
-        "published_pages": len(bundle["pages"]),
-        "published_at": None,
-    }
-
-
-def publish_existing_output(
-    *,
-    output_dir: str,
-    name: str,
-    dry_run: bool = False,
-    slug_conflict_policy: str = DEFAULT_SLUG_CONFLICT_POLICY,
-) -> dict:
-    slug_conflict_policy = normalize_slug_conflict_policy(slug_conflict_policy)
-    bundle = build_publish_bundle_from_existing_output(
-        output_dir=output_dir,
-        name=name,
-    )
-    report = (
-        {
-            **build_dry_run_publish_report(bundle),
-            "slug_conflict_policy": slug_conflict_policy,
-        }
-        if dry_run
-        else publish_bundle_to_supabase(
-            bundle,
-            slug_conflict_policy=slug_conflict_policy,
-        )
-    )
-    report_path = save_publish_report(output_dir, name, report)
-    return {
-        "output_dir": str(Path(output_dir).resolve()),
-        "name": name,
-        "slug": report.get("slug") or bundle["document"]["slug"],
-        "report": report,
-        "report_path": report_path,
-    }
-
-
-def collect_publish_queue(output_root: str | Path, *, limit: int | None = None) -> dict[str, list[dict]]:
-    from operations import collect_output_summaries
-
-    queue: list[dict] = []
-    skipped: list[dict] = []
-    seen_slugs: dict[str, dict] = {}
-    for summary in collect_output_summaries(output_root):
-        if not summary.get("publish_ready"):
-            continue
-        output_dir = summary["path"]
-        try:
-            name = infer_output_name(output_dir)
-        except Exception as exc:
-            skipped.append(
-                {
-                    "path": output_dir,
-                    "folder_name": summary["folder_name"],
-                    "status": "skipped_unresolved_name",
-                    "reason": str(exc).strip() or exc.__class__.__name__,
-                }
-            )
-            continue
-        slug = slugify(summary.get("title") or name)
-        if slug in seen_slugs:
-            skipped.append(
-                {
-                    "path": output_dir,
-                    "folder_name": summary["folder_name"],
-                    "name": name,
-                    "slug": slug,
-                    "status": "skipped_duplicate_slug",
-                    "reason": (
-                        f"Slug '{slug}' is already queued for "
-                        f"{seen_slugs[slug]['folder_name']}."
-                    ),
-                }
-            )
-            continue
-        entry = {
-            "path": output_dir,
-            "folder_name": summary["folder_name"],
-            "name": name,
-            "slug": slug,
-            "title": summary.get("title"),
-            "priority_rank": summary.get("priority_rank"),
-            "updated_at": summary.get("updated_at"),
-        }
-        queue.append(entry)
-        seen_slugs[slug] = entry
-        if limit is not None and limit > 0 and len(queue) >= limit:
-            break
-    return {"queued": queue, "skipped": skipped}
-
-
-def publish_ready_outputs(
-    output_root: str | Path,
-    *,
-    limit: int | None = None,
-    dry_run: bool = False,
-    slug_conflict_policy: str = DEFAULT_SLUG_CONFLICT_POLICY,
-) -> dict:
-    slug_conflict_policy = normalize_slug_conflict_policy(slug_conflict_policy)
-    queue_info = collect_publish_queue(output_root, limit=limit)
-    results = []
-    for entry in queue_info["queued"]:
-        try:
-            outcome = publish_existing_output(
-                output_dir=entry["path"],
-                name=entry["name"],
-                dry_run=dry_run,
-                slug_conflict_policy=slug_conflict_policy,
-            )
-            results.append(
-                {
-                    **entry,
-                    "status": outcome["report"]["status"],
-                    "reason": outcome["report"].get("reason"),
-                    "report_path": outcome["report_path"],
-                    "published_at": outcome["report"].get("published_at"),
-                    "slug_conflict_policy": outcome["report"].get("slug_conflict_policy"),
-                    "overwrote_existing": outcome["report"].get("overwrote_existing"),
-                }
-            )
-        except Exception as exc:
-            failed_report = {
-                "status": "failed",
-                "reason": str(exc).strip() or exc.__class__.__name__,
-                "slug": entry["slug"],
-                "published_at": None,
-                "slug_conflict_policy": slug_conflict_policy,
-            }
-            report_path = save_publish_report(entry["path"], entry["name"], failed_report)
-            results.append(
-                {
-                    **entry,
-                    "status": "failed",
-                    "reason": failed_report["reason"],
-                    "report_path": report_path,
-                    "published_at": None,
-                    "slug_conflict_policy": slug_conflict_policy,
-                    "overwrote_existing": False,
-                }
-            )
-    return {
-        "output_root": str(Path(output_root).resolve()),
-        "queued": queue_info["queued"],
-        "skipped": queue_info["skipped"],
-        "results": results,
-        "slug_conflict_policy": slug_conflict_policy,
-        "counts": {
-            "queued_outputs": len(queue_info["queued"]),
-            "skipped_outputs": len(queue_info["skipped"]),
-            "published_outputs": sum(1 for item in results if item["status"] == "published"),
-            "failed_outputs": sum(1 for item in results if item["status"] == "failed"),
-            "dry_run_outputs": sum(1 for item in results if item["status"] == "dry_run"),
-        },
-    }
-
-
 def main() -> None:
+    from backend.publish_batch import publish_existing_output, publish_ready_outputs
+    from backend.publish_reports import build_failed_publish_report, save_publish_report
+
     parser = argparse.ArgumentParser(
         description="Publish an existing Scholar Archive output directory to Supabase."
     )
@@ -1366,12 +1249,10 @@ def main() -> None:
         report = result["report"]
         report_path = result["report_path"]
     except Exception as exc:
-        report = {
-            "status": "failed",
-            "reason": str(exc).strip() or exc.__class__.__name__,
-            "slug": None,
-            "published_at": None,
-        }
+        report = build_failed_publish_report(
+            slug=None,
+            reason=str(exc).strip() or exc.__class__.__name__,
+        )
         report_path = save_publish_report(args.output_dir, args.name, report)
     print(f"Publish report saved: {report_path}")
     print(f"Status: {report['status']}")

@@ -11,7 +11,7 @@ import subprocess
 import sys
 
 
-APP_FILENAME = "app.py"
+APP_RELATIVE_PATH = Path("backend") / "app.py"
 APP_TITLE = "Scholar Archive"
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -38,16 +38,16 @@ def candidate_project_dirs() -> list[Path]:
     candidates: list[Path] = [Path.cwd()]
     if getattr(sys, "frozen", False):
         exe_dir = Path(sys.executable).resolve().parent
-        candidates.extend([exe_dir, exe_dir.parent])
+        candidates.extend([exe_dir, exe_dir.parent, exe_dir.parent.parent])
     else:
         script_dir = Path(__file__).resolve().parent
-        candidates.extend([script_dir, script_dir.parent])
+        candidates.extend([script_dir, script_dir.parent, script_dir.parent.parent])
     return unique_paths(candidates)
 
 
 def find_project_dir() -> Path | None:
     for directory in candidate_project_dirs():
-        if (directory / APP_FILENAME).is_file():
+        if (directory / APP_RELATIVE_PATH).is_file():
             return directory
     return None
 
@@ -78,7 +78,7 @@ def candidate_python_commands() -> list[list[str]]:
 
 
 def launch_streamlit(project_dir: Path) -> bool:
-    app_path = project_dir / APP_FILENAME
+    app_path = project_dir / APP_RELATIVE_PATH
     creation_flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
 
     for base_command in candidate_python_commands():
@@ -109,8 +109,8 @@ def main() -> int:
     project_dir = find_project_dir()
     if project_dir is None:
         show_error(
-            "Could not find app.py.\n\n"
-            "Place ScholarArchive.exe in the project folder or keep it next to the repository."
+            "Could not find backend/app.py.\n\n"
+            "Place ScholarArchive.exe inside tools/windows or keep it inside the repository tree."
         )
         return 1
 

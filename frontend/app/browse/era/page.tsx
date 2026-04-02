@@ -1,47 +1,36 @@
+import { CatalogFilters } from "@/components/catalog-filters";
 import { DocumentCard } from "@/components/document-card";
 import {
-  applyDocumentFilters,
   buildEraSections,
   getAllDocuments,
-  getArchiveOverview,
-  getLanguageOptions,
-  normalizeBrowseSort,
-  sortDocuments,
 } from "@/lib/archive";
+import {
+  buildBrowseCatalogState,
+  type BrowseSearchParams,
+} from "@/lib/browse-state";
+import type { ArchiveDocument } from "@/lib/types";
 
 export const revalidate = 60;
-
-function readParam(value: string | string[] | undefined): string {
-  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-}
 
 export default async function BrowseByEraPage({
   searchParams,
 }: {
-  searchParams?: Promise<{
-    q?: string | string[];
-    language?: string | string[];
-    rights?: string | string[];
-    sort?: string | string[];
-  }>;
+  searchParams?: Promise<BrowseSearchParams>;
 }) {
   const params = (await searchParams) ?? {};
-  const query = readParam(params.q);
-  const language = readParam(params.language);
-  const rights = readParam(params.rights);
-  const sort = normalizeBrowseSort(readParam(params.sort));
-  const allDocuments = await getAllDocuments();
-  const languageOptions = getLanguageOptions(allDocuments);
-  const documents = sortDocuments(
-    applyDocumentFilters(allDocuments, {
-      query,
-      language,
-      rights,
-    }),
-    sort,
-  );
-  const overview = getArchiveOverview(documents);
-  const eraSections = buildEraSections(documents, sort);
+  let archiveError: string | null = null;
+  let allDocuments: ArchiveDocument[] = [];
+
+  try {
+    allDocuments = await getAllDocuments();
+  } catch (error) {
+    console.error("Failed to load archive data for browse by era.", error);
+    archiveError =
+      "The era view could not load live data from Supabase for this request.";
+  }
+  const { filteredDocuments: documents, languageOptions, overview, values } =
+    buildBrowseCatalogState(allDocuments, params);
+  const eraSections = buildEraSections(documents, values.sort);
 
   return (
     <div className="stack">
@@ -52,48 +41,20 @@ export default async function BrowseByEraPage({
           Grouped by publication year and derived century labels after the
           current catalog filters are applied.
         </p>
-        <form className="catalogFilters" method="get">
-          <div className="catalogFilterField catalogFilterFieldWide">
-            <label htmlFor="era-query">Search</label>
-            <input
-              defaultValue={query}
-              id="era-query"
-              name="q"
-              placeholder="Search title, author, journal, or century"
-            />
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="era-sort">Sort</label>
-            <select defaultValue={sort} id="era-sort" name="sort">
-              <option value="recent">Most recent</option>
-              <option value="oldest">Oldest publication year</option>
-              <option value="title">Title A-Z</option>
-            </select>
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="era-language">Language</label>
-            <select defaultValue={language} id="era-language" name="language">
-              <option value="">All languages</option>
-              {languageOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="era-rights">Rights</label>
-            <select defaultValue={rights} id="era-rights" name="rights">
-              <option value="">All rights signals</option>
-              <option value="public_domain">Likely public domain</option>
-              <option value="undetermined">Rights uncertain</option>
-            </select>
-          </div>
-          <div className="catalogFilterActions">
-            <button type="submit">Apply filters</button>
-          </div>
-        </form>
+        <CatalogFilters
+          idPrefix="era"
+          languageOptions={languageOptions}
+          resetHref="/browse/era"
+          values={values}
+        />
       </section>
+
+      {archiveError ? (
+        <section className="noticePanel">
+          <h2>Archive data is temporarily unavailable</h2>
+          <p>{archiveError}</p>
+        </section>
+      ) : null}
 
       {documents.length > 0 ? (
         <section className="sectionPanel">
@@ -170,7 +131,7 @@ export default async function BrowseByEraPage({
         </section>
       ))}
 
-      {documents.length === 0 ? (
+      {documents.length === 0 && !archiveError ? (
         <section className="emptyState">No documents match the current filter.</section>
       ) : null}
     </div>

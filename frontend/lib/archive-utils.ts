@@ -1,9 +1,21 @@
 import type { ArchiveDocument } from "@/lib/types";
 
-export type ArchiveBrowseSort = "recent" | "oldest" | "title";
+export type ArchiveBrowseSort =
+  | "recent"
+  | "oldest"
+  | "title"
+  | "author"
+  | "pages_desc";
 
 export type ArchiveFilterOptions = {
   query?: string;
+  title?: string;
+  author?: string;
+  journal?: string;
+  volume?: string;
+  issue?: string;
+  yearFrom?: string;
+  yearTo?: string;
   language?: string;
   rights?: string;
 };
@@ -60,32 +72,76 @@ export function getRightsLabel(assessment: string | null | undefined): string {
 export function normalizeBrowseSort(
   value: string | null | undefined,
 ): ArchiveBrowseSort {
-  if (value === "oldest" || value === "title") {
+  if (
+    value === "oldest"
+    || value === "title"
+    || value === "author"
+    || value === "pages_desc"
+  ) {
     return value;
   }
   return "recent";
+}
+
+function tokenizeQuery(query: string): string[] {
+  return normalizeText(query)
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function buildDocumentSearchText(document: ArchiveDocument): string {
+  return [
+    document.title,
+    document.author_display,
+    document.journal_or_book,
+    document.century_label,
+    document.language,
+    document.publication_year,
+    document.volume,
+    document.issue,
+    document.page_range,
+    document.doi,
+  ]
+    .filter(Boolean)
+    .map((value) => normalizeText(String(value)))
+    .join(" ");
+}
+
+function matchesTextField(
+  value: string | number | null | undefined,
+  query: string,
+): boolean {
+  const normalizedQuery = normalizeText(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+  return normalizeText(String(value ?? "")).includes(normalizedQuery);
+}
+
+function parseYearParam(value: string | null | undefined): number | null {
+  const text = String(value ?? "").trim();
+  if (!text) {
+    return null;
+  }
+  const parsed = Number(text);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return null;
+  }
+  return parsed;
 }
 
 export function filterDocuments(
   documents: ArchiveDocument[],
   query: string,
 ): ArchiveDocument[] {
-  const q = query.trim().toLowerCase();
-  if (!q) {
+  const tokens = tokenizeQuery(query);
+  if (!tokens.length) {
     return documents;
   }
-  return documents.filter((document) =>
-    [
-      document.title,
-      document.author_display,
-      document.journal_or_book,
-      document.century_label,
-      document.language,
-      document.publication_year,
-    ]
-      .filter(Boolean)
-      .some((value) => String(value).toLowerCase().includes(q)),
-  );
+  return documents.filter((document) => {
+    const searchText = buildDocumentSearchText(document);
+    return tokens.every((token) => searchText.includes(token));
+  });
 }
 
 export function applyDocumentFilters(
@@ -93,9 +149,37 @@ export function applyDocumentFilters(
   options: ArchiveFilterOptions,
 ): ArchiveDocument[] {
   const query = options.query?.trim() ?? "";
+  const title = options.title?.trim() ?? "";
+  const author = options.author?.trim() ?? "";
+  const journal = options.journal?.trim() ?? "";
+  const volume = options.volume?.trim() ?? "";
+  const issue = options.issue?.trim() ?? "";
+  const yearFrom = parseYearParam(options.yearFrom);
+  const yearTo = parseYearParam(options.yearTo);
   const language = normalizeText(options.language);
   const rights = normalizeText(options.rights);
   return filterDocuments(documents, query).filter((document) => {
+    if (!matchesTextField(document.title, title)) {
+      return false;
+    }
+    if (!matchesTextField(document.author_display, author)) {
+      return false;
+    }
+    if (!matchesTextField(document.journal_or_book, journal)) {
+      return false;
+    }
+    if (!matchesTextField(document.volume, volume)) {
+      return false;
+    }
+    if (!matchesTextField(document.issue, issue)) {
+      return false;
+    }
+    if (yearFrom !== null && (document.publication_year ?? Number.NEGATIVE_INFINITY) < yearFrom) {
+      return false;
+    }
+    if (yearTo !== null && (document.publication_year ?? Number.POSITIVE_INFINITY) > yearTo) {
+      return false;
+    }
     if (language && normalizeText(document.language) !== language) {
       return false;
     }
@@ -113,6 +197,14 @@ export function sortDocuments(
   return [...documents].sort((left, right) => {
     if (sort === "title") {
       return left.title.localeCompare(right.title);
+    }
+    if (sort === "author") {
+      const leftAuthor = left.author_display ?? "Unknown author";
+      const rightAuthor = right.author_display ?? "Unknown author";
+      return leftAuthor.localeCompare(rightAuthor) || left.title.localeCompare(right.title);
+    }
+    if (sort === "pages_desc") {
+      return right.page_count - left.page_count || left.title.localeCompare(right.title);
     }
     if (sort === "oldest") {
       const leftYear = left.publication_year ?? Number.MAX_SAFE_INTEGER;

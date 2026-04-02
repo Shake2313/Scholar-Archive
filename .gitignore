@@ -4,8 +4,9 @@ build/
 .env
 output/
 test_output/
-tests_tmp/
-ScholarArchive.exe
+tests/.tmp/
+tools/windows/ScholarArchive.exe
+tools/windows/build/
 glossary.db
 *.log
 *_error.log
@@ -14,3 +15,5 @@ _miktex_download.html
 frontend/node_modules/
 frontend/.next/
 .codex_supabase_exec_result.txt
+
+.vercel

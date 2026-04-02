@@ -9,14 +9,26 @@ import {
   getTopCenturies,
 } from "@/lib/archive";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
+import type { ArchiveDocument } from "@/lib/types";
 
 export const revalidate = 60;
 
 export default async function HomePage() {
-  const [allDocuments, recentDocuments] = await Promise.all([
-    getAllDocuments(),
-    getRecentDocuments(6),
-  ]);
+  let archiveError: string | null = null;
+  let allDocuments: ArchiveDocument[] = [];
+  let recentDocuments: ArchiveDocument[] = [];
+
+  try {
+    [allDocuments, recentDocuments] = await Promise.all([
+      getAllDocuments(),
+      getRecentDocuments(6),
+    ]);
+  } catch (error) {
+    console.error("Failed to load archive data for the home page.", error);
+    archiveError =
+      "The live archive could not reach Supabase during the latest data fetch.";
+  }
+
   const overview = getArchiveOverview(allDocuments);
   const topAuthors = getTopAuthors(allDocuments, 5);
   const topCenturies = getTopCenturies(allDocuments, 5);
@@ -86,6 +98,16 @@ export default async function HomePage() {
             <code>SUPABASE_URL</code> with{" "}
             <code>SUPABASE_SERVICE_ROLE_KEY</code> /{" "}
             <code>SUPABASE_SECRET_KEY</code>, to render live archive data.
+          </p>
+        </section>
+      ) : null}
+
+      {archiveError ? (
+        <section className="noticePanel">
+          <h2>Archive data is temporarily unavailable</h2>
+          <p>
+            {archiveError} The shell is online, but live catalog data could not
+            be loaded for this request.
           </p>
         </section>
       ) : null}
@@ -186,7 +208,7 @@ export default async function HomePage() {
           {recentDocuments.map((document) => (
             <DocumentCard document={document} key={document.id} />
           ))}
-          {recentDocuments.length === 0 ? (
+          {recentDocuments.length === 0 && !archiveError ? (
             <div className="emptyState">
               No published documents yet. Once the pipeline publishes a run,
               entries will appear here automatically.

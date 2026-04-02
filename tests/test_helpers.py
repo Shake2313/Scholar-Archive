@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import sys
@@ -6,14 +7,17 @@ import unittest
 import uuid
 from pathlib import Path
 
-from pipeline import (
+from backend.pipeline import (
     apply_manual_metadata_override,
+    assess_rights,
+    build_metadata_report,
     build_effective_metadata,
     build_rights_metadata,
     collect_cached_image_paths,
     chunked,
     extract_json_object,
     find_first_cached_page_artifacts,
+    load_metadata_context,
     load_pipeline_state,
     load_metadata_report,
     normalize_ai_metadata,
@@ -25,27 +29,31 @@ from pipeline import (
     pipeline_state_path,
     pipeline_stdout_log_path,
     preflight_kwargs_for_run_mode,
+    refresh_metadata_outputs,
     redirect_pipeline_output,
+    resolve_requested_page_numbers,
     resolve_run_mode,
     render_metadata_prompt,
     RUN_MODE_FULL,
     RUN_MODE_KOREAN_PDF_ONLY,
     RUN_MODE_METADATA_ONLY,
     RUN_MODE_TRANSLATION_ONLY,
+    save_rights_report,
     save_pipeline_state,
     should_include_page_in_merge,
     should_reuse_cached_page,
     split_latex_into_page_docs,
 )
-from publish import (
+from backend.publish import (
     build_publish_bundle,
     build_publish_bundle_from_existing_output,
     century_label,
     latex_to_readable_text,
     slugify,
     storage_relative_path,
+    write_metadata_override,
 )
-from steps import (
+from backend.steps import (
     _apply_common_compile_fix,
     _latex_compile_timeout_sec,
     _request_http_options,
@@ -58,7 +66,7 @@ from steps import (
 
 class PipelineHelperTests(unittest.TestCase):
     def make_workspace_dir(self):
-        root = Path(__file__).resolve().parents[1] / "tests_tmp"
+        root = Path(__file__).resolve().parent / ".tmp"
         root.mkdir(exist_ok=True)
         path = root / f"case_{uuid.uuid4().hex}"
         path.mkdir()
@@ -153,6 +161,148 @@ class PipelineHelperTests(unittest.TestCase):
         path = Path(tmpdir) / "demo_metadata.json"
         path.write_text('{"raw_pdf_metadata":{"title":"Demo"},"deterministic_inference":{"title":"Demo"},"ai_inference":{"title":"Demo","status":"ok","error":null}}', encoding="utf-8")
         self.assertEqual(load_metadata_report(tmpdir, "demo"), report)
+
+    def test_load_metadata_context_reuses_cached_report(self):
+        tmpdir = self.make_workspace_dir()
+        report = build_metadata_report(
+            name="demo",
+            raw_pdf_metadata={"title": "Cached raw"},
+            deterministic_metadata={
+                "title": "Cached title",
+                "author": "Cached author",
+                "publication_year": 1918,
+                "death_year": None,
+            },
+            ai_metadata={
+                "title": "AI title",
+                "author": "AI author",
+                "publication_year": 1918,
+                "death_year": None,
+                "journal_or_book": None,
+                "volume": None,
+                "issue": None,
+                "pages": None,
+                "language": None,
+                "doi": None,
+                "confidence": {field: "none" for field in (
+                    "title",
+                    "author",
+                    "publication_year",
+                    "death_year",
+                    "journal_or_book",
+                    "volume",
+                    "issue",
+                    "pages",
+                    "language",
+                    "doi",
+                )},
+                "evidence": {},
+                "status": "ok",
+                "error": None,
+            },
+            manual_override={"author": "Manual author"},
+            effective_metadata={"title": "Effective title"},
+            effective_sources={"title": "structure"},
+            rights_metadata={"author": "Rights author"},
+            rights_sources={"author": "structure"},
+        )
+        write_metadata_override(tmpdir, "demo", {"author": "Manual author"})
+        Path(tmpdir, "demo_metadata.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        (
+            raw_pdf_metadata,
+            deterministic_metadata,
+            ai_metadata,
+            manual_override,
+            metadata_report_reused,
+        ) = load_metadata_context(
+            output_dir=tmpdir,
+            name="demo",
+            source_pdf_path=None,
+            resume=True,
+            force_refresh_metadata=False,
+        )
+
+        self.assertEqual(raw_pdf_metadata["title"], "Cached raw")
+        self.assertEqual(deterministic_metadata["author"], "Cached author")
+        self.assertEqual(ai_metadata["status"], "ok")
+        self.assertEqual(manual_override["author"], "Manual author")
+        self.assertTrue(metadata_report_reused)
+
+    def test_refresh_metadata_outputs_saves_report_and_manual_override(self):
+        tmpdir = self.make_workspace_dir()
+        (
+            effective_metadata,
+            effective_sources,
+            rights_metadata,
+            rights_sources,
+            metadata_report_path_value,
+        ) = refresh_metadata_outputs(
+            output_dir=tmpdir,
+            name="demo",
+            author=None,
+            publication_year=None,
+            death_year=None,
+            raw_pdf_metadata={"title": "Raw title"},
+            deterministic_metadata={
+                "title": "Structured title",
+                "author": "Structured author",
+                "publication_year": 1918,
+                "death_year": None,
+            },
+            ai_metadata=normalize_recorded_ai_metadata({}),
+            manual_override={"author": "Manual author"},
+        )
+
+        self.assertEqual(effective_metadata["title"], "Raw title")
+        self.assertEqual(effective_metadata["author"], "Manual author")
+        self.assertEqual(effective_sources["author"], "manual_override")
+        self.assertEqual(rights_metadata["author"], "Manual author")
+        self.assertEqual(rights_sources["author"], "manual_override")
+        self.assertTrue(Path(metadata_report_path_value).is_file())
+        saved_report = load_metadata_report(tmpdir, "demo")
+        self.assertEqual(saved_report["manual_override"]["author"], "Manual author")
+        self.assertEqual(saved_report["effective_metadata"]["author"], "Manual author")
+
+    def test_save_rights_report_persists_source_summary(self):
+        tmpdir = self.make_workspace_dir()
+        rights_info, rights_path = save_rights_report(
+            tmpdir,
+            "demo",
+            "Jean Le Rond D'Alembert",
+            1750,
+            None,
+            sources={"author": "structure", "publication_year": "ai_high"},
+        )
+        saved = json.loads(Path(rights_path).read_text(encoding="utf-8"))
+        self.assertEqual(saved["assessment"], "likely_public_domain_us")
+        self.assertTrue(saved["needs_manual_review"])
+        self.assertIn("publication_year=ai_high", saved["source_summary"])
+        self.assertEqual(saved["assessment"], rights_info["assessment"])
+
+    def test_resolve_requested_page_numbers_handles_retry_and_all_pages(self):
+        page_numbers, retry_page_numbers, requested_page_numbers = resolve_requested_page_numbers(
+            total_input_pages=5,
+            pages=None,
+            retry_pages="2,4",
+            state_requested_pages=[1, 2, 3, 4],
+        )
+        self.assertEqual(page_numbers, [1, 3])
+        self.assertEqual(retry_page_numbers, {2, 4})
+        self.assertEqual(requested_page_numbers, [1, 2, 3, 4])
+
+        page_numbers, retry_page_numbers, requested_page_numbers = resolve_requested_page_numbers(
+            total_input_pages=3,
+            pages=None,
+            retry_pages=None,
+            state_requested_pages=None,
+        )
+        self.assertIsNone(page_numbers)
+        self.assertEqual(retry_page_numbers, set())
+        self.assertEqual(requested_page_numbers, [1, 2, 3])
 
     def test_normalize_recorded_ai_metadata_preserves_status_and_error(self):
         normalized = normalize_recorded_ai_metadata(
@@ -321,6 +471,30 @@ class PipelineHelperTests(unittest.TestCase):
         self.assertIsNone(rights["publication_year"])
         self.assertIsNone(rights["death_year"])
         self.assertEqual(sources["author"], "ai_high")
+
+    def test_assess_rights_flags_ai_inferred_public_domain_for_manual_review(self):
+        rights = assess_rights(
+            "Jean Le Rond D'Alembert",
+            1750,
+            None,
+            sources={"publication_year": "ai_high", "author": "structure"},
+        )
+        self.assertEqual(rights["assessment"], "likely_public_domain_us")
+        self.assertEqual(rights["basis"], "publication_year")
+        self.assertTrue(rights["needs_manual_review"])
+        self.assertIn("AI-inferred metadata", rights["reason"])
+
+    def test_assess_rights_accepts_direct_death_year_without_review_flag(self):
+        rights = assess_rights(
+            "Emmy Noether",
+            None,
+            1935,
+            sources={"author": "user", "death_year": "user"},
+        )
+        self.assertEqual(rights["assessment"], "likely_public_domain_life_plus_70")
+        self.assertEqual(rights["basis"], "death_year")
+        self.assertFalse(rights["needs_manual_review"])
+        self.assertEqual(rights["warnings"], [])
 
     def test_apply_manual_metadata_override_replaces_effective_and_rights_values(self):
         effective, effective_sources, rights, right_sources = apply_manual_metadata_override(
@@ -732,7 +906,7 @@ class PipelineHelperTests(unittest.TestCase):
 
 class PipelineStateTests(unittest.TestCase):
     def make_workspace_dir(self):
-        root = Path(__file__).resolve().parents[1] / "tests_tmp"
+        root = Path(__file__).resolve().parent / ".tmp"
         root.mkdir(exist_ok=True)
         path = root / f"case_{uuid.uuid4().hex}"
         path.mkdir()

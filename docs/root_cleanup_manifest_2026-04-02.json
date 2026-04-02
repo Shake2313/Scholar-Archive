@@ -1,0 +1,68 @@
+﻿{
+    "manifest_type":  "root_cleanup_manifest/v1",
+    "created_at":  "2026-04-02T12:45:44",
+    "root":  "C:\\Users\\박수인\\Desktop\\백업\\Coding\\Scholar Archive",
+    "notes":  [
+                  "Created before the approved root cleanup pass.",
+                  "This manifest records moved and deleted items for operator review."
+              ],
+    "operations":  [
+                       {
+                           "kind":  "move",
+                           "from":  "FRONTEND_ARCHIVE_DESIGN.md",
+                           "to":  "docs/FRONTEND_ARCHIVE_DESIGN.md"
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "build",
+                           "recursive":  true
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "tests_tmp",
+                           "recursive":  true
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "__pycache__",
+                           "recursive":  true
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "frontend_dev_stdout.log",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "frontend_dev_stderr.log",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "retry_dalembert_stdout.log",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "retry_dalembert_stderr.log",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  ".codex_supabase_exec_result.txt",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "_miktex_download.html",
+                           "recursive":  false
+                       },
+                       {
+                           "kind":  "delete",
+                           "path":  "test_paper.pdf",
+                           "recursive":  false
+                       }
+                   ],
+    "completed_at":  "2026-04-02T12:49:54",
+    "status":  "completed"
+}

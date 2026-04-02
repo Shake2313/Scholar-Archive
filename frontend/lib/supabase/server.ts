@@ -9,12 +9,24 @@ type SupabaseConfig = {
   key: string;
 };
 
+function readEnv(name: string): string | null {
+  const value = process.env[name];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === '""' || trimmed === "''") {
+    return null;
+  }
+  return trimmed;
+}
+
 function getSupabaseConfig(): SupabaseConfig | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
+  const url = readEnv("NEXT_PUBLIC_SUPABASE_URL") ?? readEnv("SUPABASE_URL");
   const key =
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ??
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.SUPABASE_SECRET_KEY;
+    readEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY") ??
+    readEnv("SUPABASE_SERVICE_ROLE_KEY") ??
+    readEnv("SUPABASE_SECRET_KEY");
   if (!url || !key) {
     return null;
   }
@@ -26,7 +38,7 @@ export function isSupabaseConfigured(): boolean {
 }
 
 export function getSupabaseBaseUrl(): string | null {
-  return process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL ?? null;
+  return readEnv("NEXT_PUBLIC_SUPABASE_URL") ?? readEnv("SUPABASE_URL");
 }
 
 export function getSupabaseReadClient(): SupabaseClient | null {

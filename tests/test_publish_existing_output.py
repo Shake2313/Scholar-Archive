@@ -2,16 +2,13 @@ import shutil
 import unittest
 import uuid
 from pathlib import Path
-from unittest.mock import patch
 
-from publish import (
+from backend.publish import (
     apply_metadata_override,
     build_publish_bundle_from_existing_output,
-    collect_publish_queue,
     delete_metadata_override,
     infer_output_name,
     load_metadata_override,
-    publish_ready_outputs,
     save_metadata_override,
     write_metadata_override,
 )
@@ -19,7 +16,7 @@ from publish import (
 
 class ExistingOutputPublishTests(unittest.TestCase):
     def make_workspace_dir(self):
-        root = Path(__file__).resolve().parents[1] / "tests_tmp"
+        root = Path(__file__).resolve().parent / ".tmp"
         root.mkdir(exist_ok=True)
         path = root / f"case_{uuid.uuid4().hex}"
         path.mkdir()
@@ -168,152 +165,6 @@ class ExistingOutputPublishTests(unittest.TestCase):
         self.assertEqual(bundle["document"]["author_display"], "Corrected Author")
         self.assertEqual(bundle["document"]["publication_year"], 1919)
         self.assertEqual(bundle["snapshot"]["manual_override"]["title"], "Corrected Legacy Title")
-
-    def test_collect_publish_queue_keeps_ready_outputs_and_skips_duplicate_slugs(self):
-        root = self.make_workspace_dir()
-
-        first = root / "first_ready"
-        first.mkdir()
-        (first / "first_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "Alpha Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 1, "failed_pages": [], "partial_output": false},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-
-        duplicate = root / "duplicate_ready"
-        duplicate.mkdir()
-        (duplicate / "duplicate_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "Alpha Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 1, "failed_pages": [], "partial_output": false},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-
-        partial = root / "partial"
-        partial.mkdir()
-        (partial / "partial_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "Partial Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 0, "failed_pages": [1], "partial_output": true},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-
-        published = root / "published"
-        published.mkdir()
-        (published / "published_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "Published Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 1, "failed_pages": [], "partial_output": false},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-        (published / "published_publish_report.json").write_text(
-            "{\"status\": \"published\", \"slug\": \"published-paper\"}",
-            encoding="utf-8",
-        )
-
-        queue = collect_publish_queue(root)
-
-        self.assertEqual([item["folder_name"] for item in queue["queued"]], ["duplicate_ready"])
-        self.assertEqual(queue["queued"][0]["name"], "duplicate")
-        self.assertEqual(queue["queued"][0]["slug"], "alpha-paper")
-        self.assertEqual(len(queue["skipped"]), 1)
-        self.assertEqual(queue["skipped"][0]["status"], "skipped_duplicate_slug")
-
-    def test_publish_ready_outputs_processes_queue_in_priority_order(self):
-        root = self.make_workspace_dir()
-
-        first = root / "a_ready"
-        first.mkdir()
-        (first / "alpha_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "First Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 1, "failed_pages": [], "partial_output": false},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-
-        second = root / "b_ready"
-        second.mkdir()
-        (second / "beta_quality_report.json").write_text(
-            """
-            {
-              "paper_name": "Second Paper",
-              "total_pages": 1,
-              "transcription": {"successful_pages": 1, "failed_pages": [], "partial_output": false},
-              "digitalized_pdf": {"compiled": true},
-              "korean_pdf": {"compiled": true}
-            }
-            """.strip(),
-            encoding="utf-8",
-        )
-
-        def fake_publish_existing_output(*, output_dir, name, dry_run, slug_conflict_policy):
-            return {
-                "output_dir": str(Path(output_dir).resolve()),
-                "name": name,
-                "slug": f"{name}-slug",
-                "report": {
-                    "status": "dry_run" if dry_run else "published",
-                    "reason": None,
-                    "published_at": None,
-                    "slug_conflict_policy": "skip",
-                    "overwrote_existing": False,
-                },
-                "report_path": str(Path(output_dir) / f"{name}_publish_report.json"),
-            }
-
-        with patch("publish.publish_existing_output", side_effect=fake_publish_existing_output) as mocked:
-            batch = publish_ready_outputs(root, dry_run=True, slug_conflict_policy="skip")
-
-        self.assertEqual(
-            [
-                (
-                    call.kwargs["output_dir"],
-                    call.kwargs["name"],
-                    call.kwargs["slug_conflict_policy"],
-                )
-                for call in mocked.call_args_list
-            ],
-            [
-                (str(first.resolve()), "alpha", "skip"),
-                (str(second.resolve()), "beta", "skip"),
-            ],
-        )
-        self.assertEqual(batch["counts"]["queued_outputs"], 2)
-        self.assertEqual(batch["counts"]["dry_run_outputs"], 2)
-        self.assertEqual(batch["slug_conflict_policy"], "skip")
-        self.assertEqual([item["folder_name"] for item in batch["results"]], ["a_ready", "b_ready"])
-
 
 if __name__ == "__main__":
     unittest.main()

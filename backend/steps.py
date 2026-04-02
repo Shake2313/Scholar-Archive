@@ -16,7 +16,7 @@ from datetime import datetime
 from google import genai
 from google.genai import types
 
-from prompts import STEP3_SYS, STEP3_USR
+from backend.prompts import STEP3_SYS, STEP3_USR
 
 # Model to use for all API calls — override via environment variable MODEL_NAME
 DEFAULT_MODEL = os.environ.get("MODEL_NAME", "gemini-3-flash-preview")

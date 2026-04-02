@@ -4,12 +4,12 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from operations import build_operations_summary, summarize_output_directory
+from backend.operations import build_operations_summary, summarize_output_directory
 
 
 class OperationsSummaryTests(unittest.TestCase):
     def make_workspace_dir(self):
-        root = Path(__file__).resolve().parents[1] / "tests_tmp"
+        root = Path(__file__).resolve().parent / ".tmp"
         root.mkdir(exist_ok=True)
         path = root / f"case_{uuid.uuid4().hex}"
         path.mkdir()
@@ -299,6 +299,71 @@ class OperationsSummaryTests(unittest.TestCase):
         self.assertEqual(rows["title"]["manual_override_value"], "Manual Title")
         self.assertFalse(rows["title"]["review_needed"])
 
+    def test_summarize_output_directory_exposes_rights_review_and_compile_warnings(self):
+        root = self.make_workspace_dir()
+        output_dir = root / "rights_compile_review"
+        output_dir.mkdir()
+        (output_dir / "rights_compile_review_quality_report.json").write_text(
+            """
+            {
+              "paper_name": "Rights Compile Review",
+              "total_pages": 1,
+              "transcription": {
+                "successful_pages": 1,
+                "failed_pages": [],
+                "partial_output": false
+              },
+              "digitalized_pdf": {
+                "compiled": true
+              },
+              "korean_pdf": {
+                "compiled": true
+              }
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+        (output_dir / "rights_compile_review_metadata.json").write_text(
+            """
+            {
+              "rights_sources": {
+                "author": "structure",
+                "publication_year": "ai_high"
+              }
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+        (output_dir / "rights_compile_review_rights_check.json").write_text(
+            """
+            {
+              "assessment": "likely_public_domain_us",
+              "reason": "Publication year is 1929 or earlier (US heuristic). Publication year came from AI-inferred metadata; confirm manually.",
+              "needs_manual_review": true,
+              "source_summary": "author=structure, publication_year=ai_high",
+              "warnings": []
+            }
+            """.strip(),
+            encoding="utf-8",
+        )
+        (output_dir / "rights_compile_review_Korean.log").write_text(
+            """
+            Package microtype Warning: Unknown slot number of character
+            Package microtype Warning: Unknown slot number of character
+            Underfull \\hbox (badness 10000) in paragraph at lines 40--42
+            """.strip(),
+            encoding="utf-8",
+        )
+
+        summary = summarize_output_directory(output_dir)
+
+        self.assertTrue(summary["rights_needs_manual_review"])
+        self.assertIn("Review required", summary["rights_review_summary"])
+        self.assertIn("publication_year=ai_high", summary["rights_review_summary"])
+        self.assertEqual(summary["compile_warning_count"], 3)
+        self.assertIn("microtype warning", summary["compile_warning_summary"])
+        self.assertEqual(summary["next_action"], "Review rights metadata")
+
     def test_summarize_output_directory_exposes_dns_publish_issue(self):
         root = self.make_workspace_dir()
         output_dir = root / "dns_publish"
@@ -504,6 +569,8 @@ class OperationsSummaryTests(unittest.TestCase):
         self.assertEqual(summary["counts"]["published_outputs"], 1)
         self.assertEqual(summary["counts"]["publish_failed_outputs"], 1)
         self.assertEqual(summary["counts"]["metadata_review_outputs"], 0)
+        self.assertEqual(summary["counts"]["rights_review_outputs"], 0)
+        self.assertEqual(summary["counts"]["compile_warning_outputs"], 0)
         self.assertEqual(summary["documents"][0]["folder_name"], "failed_publish")
         self.assertEqual(summary["documents"][1]["folder_name"], "published")
 

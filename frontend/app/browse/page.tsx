@@ -1,48 +1,33 @@
+import { CatalogFilters } from "@/components/catalog-filters";
 import { DocumentCard } from "@/components/document-card";
+import { getAllDocuments } from "@/lib/archive";
 import {
-  applyDocumentFilters,
-  getAllDocuments,
-  getArchiveOverview,
-  getLanguageOptions,
-  normalizeBrowseSort,
-  sortDocuments,
-} from "@/lib/archive";
+  buildBrowseCatalogState,
+  type BrowseSearchParams,
+} from "@/lib/browse-state";
+import type { ArchiveDocument } from "@/lib/types";
 
 export const revalidate = 60;
-
-function readParam(
-  value: string | string[] | undefined,
-): string {
-  return Array.isArray(value) ? value[0] ?? "" : value ?? "";
-}
 
 export default async function BrowsePage({
   searchParams,
 }: {
-  searchParams?: Promise<{
-    q?: string | string[];
-    language?: string | string[];
-    rights?: string | string[];
-    sort?: string | string[];
-  }>;
+  searchParams?: Promise<BrowseSearchParams>;
 }) {
   const params = (await searchParams) ?? {};
-  const query = readParam(params.q);
-  const language = readParam(params.language);
-  const rights = readParam(params.rights);
-  const sort = normalizeBrowseSort(readParam(params.sort));
 
-  const documents = await getAllDocuments();
-  const languageOptions = getLanguageOptions(documents);
-  const filteredDocuments = sortDocuments(
-    applyDocumentFilters(documents, {
-      query,
-      language,
-      rights,
-    }),
-    sort,
-  );
-  const overview = getArchiveOverview(documents);
+  let archiveError: string | null = null;
+  let documents: ArchiveDocument[] = [];
+
+  try {
+    documents = await getAllDocuments();
+  } catch (error) {
+    console.error("Failed to load archive catalog.", error);
+    archiveError =
+      "The catalog could not load live data from Supabase for this request.";
+  }
+  const { filteredDocuments, languageOptions, overview, values } =
+    buildBrowseCatalogState(documents, params);
 
   return (
     <div className="stack">
@@ -51,54 +36,16 @@ export default async function BrowsePage({
         <h1>Browse the public archive</h1>
         <p className="sectionLead">
           Search across titles, authors, journals, languages, publication
-          years, and rights signals from the published collection.
+          years, volume and issue metadata, and rights signals from the
+          published collection.
         </p>
 
-        <form className="catalogFilters" method="get">
-          <div className="catalogFilterField catalogFilterFieldWide">
-            <label htmlFor="catalog-query">Search</label>
-            <input
-              defaultValue={query}
-              id="catalog-query"
-              name="q"
-              placeholder="Title, author, journal, year, or century"
-            />
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="catalog-sort">Sort</label>
-            <select defaultValue={sort} id="catalog-sort" name="sort">
-              <option value="recent">Most recent</option>
-              <option value="oldest">Oldest publication year</option>
-              <option value="title">Title A-Z</option>
-            </select>
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="catalog-language">Language</label>
-            <select
-              defaultValue={language}
-              id="catalog-language"
-              name="language"
-            >
-              <option value="">All languages</option>
-              {languageOptions.map((option) => (
-                <option key={option} value={option}>
-                  {option}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="catalogFilterField">
-            <label htmlFor="catalog-rights">Rights</label>
-            <select defaultValue={rights} id="catalog-rights" name="rights">
-              <option value="">All rights signals</option>
-              <option value="public_domain">Likely public domain</option>
-              <option value="undetermined">Rights uncertain</option>
-            </select>
-          </div>
-          <div className="catalogFilterActions">
-            <button type="submit">Apply filters</button>
-          </div>
-        </form>
+        <CatalogFilters
+          idPrefix="catalog"
+          languageOptions={languageOptions}
+          resetHref="/browse"
+          values={values}
+        />
       </section>
 
       <section className="sectionPanel">
@@ -138,12 +85,18 @@ export default async function BrowsePage({
             <h2>Catalog results</h2>
           </div>
         </div>
+        {archiveError ? (
+          <div className="noticePanel">
+            <h3>Archive data is temporarily unavailable</h3>
+            <p>{archiveError}</p>
+          </div>
+        ) : null}
         <div className="cardGrid">
           {filteredDocuments.map((document) => (
             <DocumentCard document={document} key={document.id} />
           ))}
         </div>
-        {filteredDocuments.length === 0 ? (
+        {filteredDocuments.length === 0 && !archiveError ? (
           <div className="emptyState">
             No documents match the current search. Try a broader query or clear
             one of the filters.

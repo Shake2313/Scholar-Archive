@@ -1,0 +1,83 @@
+﻿{
+    "manifest_type":  "structure_refactor_manifest/v1",
+    "created_at":  "2026-04-02T12:56:15",
+    "root":  "C:\\Users\\박수인\\Desktop\\백업\\Coding\\Scholar Archive",
+    "notes":  [
+                  "Created before the approved structure refactor pass.",
+                  "This manifest records the file moves performed during the root cleanup phase 2."
+              ],
+    "operations":  [
+                       {
+                           "kind":  "move",
+                           "from":  "app.py",
+                           "to":  "backend/app.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "app_output.py",
+                           "to":  "backend/app_output.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "operations.py",
+                           "to":  "backend/operations.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "pipeline.py",
+                           "to":  "backend/pipeline.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "prompts.py",
+                           "to":  "backend/prompts.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "publish.py",
+                           "to":  "backend/publish.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "publish_batch.py",
+                           "to":  "backend/publish_batch.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "publish_reports.py",
+                           "to":  "backend/publish_reports.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "steps.py",
+                           "to":  "backend/steps.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "requirements.txt",
+                           "to":  "backend/requirements.txt"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "build_launcher.bat",
+                           "to":  "tools/windows/build_launcher.bat"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "launcher.py",
+                           "to":  "tools/windows/launcher.py"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "run_streamlit.bat",
+                           "to":  "tools/windows/run_streamlit.bat"
+                       },
+                       {
+                           "kind":  "move",
+                           "from":  "ScholarArchive.exe",
+                           "to":  "tools/windows/ScholarArchive.exe"
+                       }
+                   ],
+    "completed_at":  "2026-04-02T13:03:42",
+    "status":  "completed"
+}

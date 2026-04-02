@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { getRightsLabel } from "@/lib/archive-utils";
 import type { ArchiveDocument, ArchivePage } from "@/lib/types";
@@ -9,6 +9,58 @@ import type { ArchiveDocument, ArchivePage } from "@/lib/types";
 type PageWithUrls = ArchivePage & {
   imageUrl: string | null;
 };
+
+type ReadingMode = "digitalized" | "korean" | "parallel";
+
+function summarizePageText(page: ArchivePage): string {
+  const text = (page.digitalized_text ?? page.korean_text ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) {
+    return "No extracted text available.";
+  }
+  return text.length > 140 ? `${text.slice(0, 137).trimEnd()}...` : text;
+}
+
+function pageAvailabilityLabel(page: ArchivePage | null): string {
+  if (!page) {
+    return "No page selected";
+  }
+  const hasOriginal = Boolean(page.digitalized_text?.trim());
+  const hasTranslation = Boolean(page.korean_text?.trim());
+  if (hasOriginal && hasTranslation) {
+    return "Original + Korean";
+  }
+  if (hasOriginal) {
+    return "Original only";
+  }
+  if (hasTranslation) {
+    return "Korean only";
+  }
+  return "Image only";
+}
+
+function TextPanel({
+  title,
+  eyebrow,
+  body,
+}: {
+  title: string;
+  eyebrow: string;
+  body: string;
+}) {
+  return (
+    <article className="viewerTextCard">
+      <header className="viewerTextCardHeader">
+        <p className="eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+      </header>
+      <div className="viewerTextCardBody">
+        <pre>{body || "No extracted text available for this page."}</pre>
+      </div>
+    </article>
+  );
+}
 
 export function DocumentViewer({
   document,
@@ -24,17 +76,53 @@ export function DocumentViewer({
   koreanPdfUrl: string | null;
 }) {
   const [pageIndex, setPageIndex] = useState(0);
-  const [tab, setTab] = useState<"digitalized" | "korean">("digitalized");
+  const [readingMode, setReadingMode] = useState<ReadingMode>("parallel");
+  const [imageZoom, setImageZoom] = useState<"fit" | "detail">("fit");
+  const imagePanelRef = useRef<HTMLDivElement | null>(null);
+  const textPanelRef = useRef<HTMLDivElement | null>(null);
+
   const currentPage = pages[pageIndex] ?? null;
-  const pageText = useMemo(() => {
-    if (!currentPage) {
-      return "";
-    }
-    return tab === "digitalized"
-      ? currentPage.digitalized_text ?? ""
-      : currentPage.korean_text ?? "";
-  }, [currentPage, tab]);
+  const currentPageNumber = currentPage?.page_number ?? null;
+  const pageCount = pages.length;
+  const currentOrdinal = pageCount > 0 ? pageIndex + 1 : 0;
   const rightsLabel = getRightsLabel(document.rights_assessment);
+
+  const currentTexts = useMemo(
+    () => ({
+      digitalized: currentPage?.digitalized_text?.trim() ?? "",
+      korean: currentPage?.korean_text?.trim() ?? "",
+    }),
+    [currentPage],
+  );
+
+  useEffect(() => {
+    imagePanelRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    textPanelRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [pageIndex]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName;
+      if (tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT") {
+        return;
+      }
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setPageIndex((index) => Math.max(index - 1, 0));
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setPageIndex((index) => Math.min(index + 1, pageCount - 1));
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pageCount]);
 
   return (
     <div className="viewerShell">
@@ -95,6 +183,15 @@ export function DocumentViewer({
         </div>
 
         <div className="viewerSidebarCard">
+          <p className="eyebrow">Reading tools</p>
+          <div className="viewerSidebarNotes">
+            <p>Use left and right arrow keys to move page by page.</p>
+            <p>Switch between original, Korean, or parallel reading without leaving the current page.</p>
+            <p>Open the scan in a separate tab when you need full-resolution inspection.</p>
+          </div>
+        </div>
+
+        <div className="viewerSidebarCard">
           <p className="eyebrow">Downloads</p>
           <div className="downloadList">
             {sourcePdfUrl ? (
@@ -116,7 +213,13 @@ export function DocumentViewer({
         </div>
 
         <div className="viewerSidebarCard">
-          <p className="eyebrow">Pages</p>
+          <div className="viewerPageRailHeader">
+            <div>
+              <p className="eyebrow">Pages</p>
+              <h2>Page rail</h2>
+            </div>
+            <span className="countBadge">{pageCount} pages</span>
+          </div>
           <div className="pageIndexList">
             {pages.map((page, index) => (
               <button
@@ -125,7 +228,11 @@ export function DocumentViewer({
                 onClick={() => setPageIndex(index)}
                 type="button"
               >
-                Page {page.page_number}
+                <span className="pageIndexButtonTop">
+                  <strong>Page {page.page_number}</strong>
+                  <small>{pageAvailabilityLabel(page)}</small>
+                </span>
+                <span className="pageIndexSnippet">{summarizePageText(page)}</span>
               </button>
             ))}
           </div>
@@ -134,22 +241,41 @@ export function DocumentViewer({
 
       <section className="viewerMain">
         <div className="viewerToolbar">
-          <div className="tabGroup">
-            <button
-              className={tab === "digitalized" ? "tabButton isActive" : "tabButton"}
-              onClick={() => setTab("digitalized")}
-              type="button"
-            >
-              Digitalized text
-            </button>
-            <button
-              className={tab === "korean" ? "tabButton isActive" : "tabButton"}
-              onClick={() => setTab("korean")}
-              type="button"
-            >
-              Korean translation
-            </button>
+          <div className="viewerToolbarGroup">
+            <div className="tabGroup">
+              <button
+                className={readingMode === "digitalized" ? "tabButton isActive" : "tabButton"}
+                onClick={() => setReadingMode("digitalized")}
+                type="button"
+              >
+                Original text
+              </button>
+              <button
+                className={readingMode === "korean" ? "tabButton isActive" : "tabButton"}
+                onClick={() => setReadingMode("korean")}
+                type="button"
+              >
+                Korean translation
+              </button>
+              <button
+                className={readingMode === "parallel" ? "tabButton isActive" : "tabButton"}
+                onClick={() => setReadingMode("parallel")}
+                type="button"
+              >
+                Parallel reading
+              </button>
+            </div>
+            <div className="viewerStatusRow">
+              <span className="viewerStatusPill">
+                {currentPageNumber ? `Page ${currentPageNumber}` : "No pages"}
+              </span>
+              <span className="viewerStatusPill">
+                {currentOrdinal} of {pageCount}
+              </span>
+              <span className="viewerStatusPill">{rightsLabel}</span>
+            </div>
           </div>
+
           <div className="viewerPageControls">
             <button
               className="tabButton"
@@ -157,11 +283,23 @@ export function DocumentViewer({
               onClick={() => setPageIndex((index) => Math.max(index - 1, 0))}
               type="button"
             >
-              Previous page
+              Previous
             </button>
-            <span className="viewerPageLabel">
-              {currentPage ? `Page ${currentPage.page_number}` : "No pages"}
-            </span>
+            {pageCount > 0 ? (
+              <label className="viewerPageJump">
+                <span>Jump to</span>
+                <select
+                  onChange={(event) => setPageIndex(Number(event.target.value))}
+                  value={pageIndex}
+                >
+                  {pages.map((page, index) => (
+                    <option key={page.page_number} value={index}>
+                      Page {page.page_number}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <button
               className="tabButton"
               disabled={pageIndex >= pages.length - 1}
@@ -170,22 +308,101 @@ export function DocumentViewer({
               }
               type="button"
             >
-              Next page
+              Next
             </button>
           </div>
         </div>
 
         <div className="viewerPanels">
-          <div className="viewerImagePanel">
-            {currentPage?.imageUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img alt={`Source page ${currentPage.page_number}`} src={currentPage.imageUrl} />
-            ) : (
-              <div className="placeholderCard">No page image available.</div>
-            )}
+          <div
+            className={imageZoom === "detail" ? "viewerImagePanel isDetail" : "viewerImagePanel"}
+            ref={imagePanelRef}
+          >
+            <div className="viewerPanelHeader">
+              <div>
+                <p className="eyebrow">Source image</p>
+                <h2>{currentPageNumber ? `Scan page ${currentPageNumber}` : "No page selected"}</h2>
+              </div>
+              <div className="viewerInlineActions">
+                <button
+                  className="tabButton"
+                  onClick={() =>
+                    setImageZoom((mode) => (mode === "fit" ? "detail" : "fit"))
+                  }
+                  type="button"
+                >
+                  {imageZoom === "fit" ? "Detail zoom" : "Fit to panel"}
+                </button>
+                {currentPage?.imageUrl ? (
+                  <a
+                    className="secondaryLink viewerUtilityLink"
+                    href={currentPage.imageUrl}
+                    rel="noreferrer"
+                    target="_blank"
+                  >
+                    Open image
+                  </a>
+                ) : null}
+              </div>
+            </div>
+            <div className="viewerImageStage">
+              {currentPage?.imageUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  alt={`Source page ${currentPage.page_number}`}
+                  src={currentPage.imageUrl}
+                />
+              ) : (
+                <div className="placeholderCard">No page image available.</div>
+              )}
+            </div>
           </div>
-          <div className="viewerTextPanel">
-            <pre>{pageText || "No extracted text available for this page."}</pre>
+
+          <div className="viewerTextPanel" ref={textPanelRef}>
+            <div className="viewerPanelHeader">
+              <div>
+                <p className="eyebrow">Reading view</p>
+                <h2>
+                  {readingMode === "parallel"
+                    ? "Original and Korean side by side"
+                    : readingMode === "digitalized"
+                      ? "Original transcription"
+                      : "Korean translation"}
+                </h2>
+              </div>
+              <div className="viewerInlineMeta">
+                <span>{pageAvailabilityLabel(currentPage)}</span>
+              </div>
+            </div>
+
+            {readingMode === "parallel" ? (
+              <div className="viewerTextCompareGrid">
+                <TextPanel
+                  body={currentTexts.digitalized}
+                  eyebrow="Original"
+                  title="Digitalized transcription"
+                />
+                <TextPanel
+                  body={currentTexts.korean}
+                  eyebrow="Translation"
+                  title="Korean translation"
+                />
+              </div>
+            ) : (
+              <TextPanel
+                body={
+                  readingMode === "digitalized"
+                    ? currentTexts.digitalized
+                    : currentTexts.korean
+                }
+                eyebrow={readingMode === "digitalized" ? "Original" : "Translation"}
+                title={
+                  readingMode === "digitalized"
+                    ? "Digitalized transcription"
+                    : "Korean translation"
+                }
+              />
+            )}
           </div>
         </div>
       </section>

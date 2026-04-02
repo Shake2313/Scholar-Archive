@@ -1,9 +1,8 @@
 """
 논문 디지털화 & 한국어 번역 파이프라인 — Streamlit UI
-Run:  streamlit run app.py
+Run:  streamlit run backend/app.py
 """
 
-import json
 import base64
 import os
 import sys
@@ -14,17 +13,26 @@ import queue
 from pathlib import Path
 from datetime import datetime
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import streamlit as st
 
-from operations import build_operations_summary, summarize_output_directory
-from publish import (
+from backend.app_output import (
+    find_pipeline_state,
+    load_manual_metadata_override,
+    read_json,
+    read_metadata_report,
+    read_rights_metadata,
+)
+from backend.operations import build_operations_summary, summarize_output_directory
+from backend.publish import (
     delete_metadata_override,
-    infer_output_name,
-    load_metadata_override,
     metadata_override_path,
     write_metadata_override,
 )
-from steps import compile_latex
+from backend.steps import compile_latex
 
 # ── 페이지 설정 ─────────────────────────────────────────────────
 st.set_page_config(page_title="논문 파이프라인", page_icon="📜", layout="wide")
@@ -81,39 +89,6 @@ def _drain_pipeline_events():
             st.session_state["pipeline_event_queue"] = None
 
 # ── 유틸 함수 ───────────────────────────────────────────────────
-def read_json(path: Path):
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
-
-
-def find_pipeline_state(output_path: Path):
-    state_files = sorted(output_path.glob("*_pipeline_state.json"))
-    if not state_files:
-        return None
-    return read_json(state_files[0])
-
-
-def read_metadata_report(output_path: Path):
-    metadata_files = sorted(output_path.glob("*_metadata.json"))
-    if not metadata_files:
-        return None
-    return read_json(metadata_files[0])
-
-
-def get_output_name(output_path: Path):
-    try:
-        return infer_output_name(output_path)
-    except Exception:
-        return None
-
-
-def load_manual_metadata_override(output_path: Path):
-    output_name = get_output_name(output_path)
-    if not output_name:
-        return None, {}
-    return output_name, load_metadata_override(output_path, output_name)
-
-
 def refresh_metadata_editor_state(output_path: Path, overrides: dict):
     source_key = str(output_path.resolve())
     if st.session_state.get("metadata_editor_source") == source_key:
@@ -121,72 +96,6 @@ def refresh_metadata_editor_state(output_path: Path, overrides: dict):
     for field, _label in METADATA_OVERRIDE_FIELD_SPECS:
         st.session_state[f"metadata_override_{field}"] = str(overrides.get(field) or "")
     st.session_state["metadata_editor_source"] = source_key
-
-
-def read_rights_metadata(output_path: Path):
-    metadata = {
-        "author": "",
-        "publication_year": "",
-        "death_year": "",
-    }
-    data = read_metadata_report(output_path)
-    if data:
-        effective = data.get("effective_metadata", {}) if isinstance(data, dict) else {}
-        rights = data.get("rights_metadata", {}) if isinstance(data, dict) else {}
-        metadata["author"] = str(
-            rights.get("author")
-            or effective.get("author")
-            or ""
-        )
-        metadata["publication_year"] = (
-            str(
-                rights.get("publication_year")
-                if rights.get("publication_year") is not None
-                else effective.get("publication_year")
-            )
-            if (
-                rights.get("publication_year") is not None
-                or effective.get("publication_year") is not None
-            )
-            else ""
-        )
-        metadata["death_year"] = (
-            str(
-                rights.get("death_year")
-                if rights.get("death_year") is not None
-                else effective.get("death_year")
-            )
-            if (
-                rights.get("death_year") is not None
-                or effective.get("death_year") is not None
-            )
-            else ""
-        )
-    _output_name, override = load_manual_metadata_override(output_path)
-    if override.get("author"):
-        metadata["author"] = str(override.get("author"))
-    if override.get("publication_year") is not None:
-        metadata["publication_year"] = str(override.get("publication_year"))
-    if override.get("death_year") is not None:
-        metadata["death_year"] = str(override.get("death_year"))
-    rights_files = sorted(output_path.glob("*_rights_check.json"))
-    if rights_files:
-        data = read_json(rights_files[0])
-        if not metadata["author"]:
-            metadata["author"] = str(data.get("author") or "")
-        if not metadata["publication_year"] and data.get("publication_year") is not None:
-            metadata["publication_year"] = str(data.get("publication_year"))
-        if not metadata["death_year"] and data.get("death_year") is not None:
-            metadata["death_year"] = str(data.get("death_year"))
-    state = find_pipeline_state(output_path)
-    if state:
-        if not metadata["author"]:
-            metadata["author"] = str(state.get("author") or "")
-        if not metadata["publication_year"] and state.get("publication_year") is not None:
-            metadata["publication_year"] = str(state.get("publication_year"))
-        if not metadata["death_year"] and state.get("death_year") is not None:
-            metadata["death_year"] = str(state.get("death_year"))
-    return metadata
 
 
 def apply_rights_metadata(source_key: str, metadata: dict | None = None):
@@ -287,11 +196,11 @@ def _run_pipeline_thread(
     event_queue.put(("log", "[THREAD] Pipeline thread started"))
     try:
         # pipeline 모듈이 같은 폴더에 있으므로 sys.path에 추가
-        project_dir = str(Path(__file__).parent)
+        project_dir = str(PROJECT_ROOT)
         if project_dir not in sys.path:
             sys.path.insert(0, project_dir)
 
-        from pipeline import redirect_pipeline_output, run_pipeline
+        from backend.pipeline import redirect_pipeline_output, run_pipeline
 
         # stdout/stderr를 캡처하면서 session_state 로그에도 실시간 추가
         class LogCapture:
@@ -358,7 +267,7 @@ with st.sidebar:
     )
 
     # 출력 폴더 — 기본값은 프로젝트 내 output/<논문이름>
-    default_out = str(Path(__file__).parent / "output" / paper_name) if paper_name else ""
+    default_out = str(PROJECT_ROOT / "output" / paper_name) if paper_name else ""
     output_dir_input = st.text_input("출력 폴더", value=default_out)
 
     pages_input = st.text_input(
@@ -453,7 +362,7 @@ with st.sidebar:
     st.subheader("기존 결과 보기")
     existing_dir = st.text_input(
         "결과 폴더 경로",
-        value=str(Path(__file__).parent / "test_output"),
+        value=str(PROJECT_ROOT / "test_output"),
         key="existing_dir",
     )
     if st.button("불러오기", width="stretch"):
@@ -473,7 +382,7 @@ with st.sidebar:
 # ── 메인 영역 ───────────────────────────────────────────────────
 st.title("📜 논문 디지털화 & 한국어 번역")
 
-operations_root = Path(__file__).parent / "output"
+operations_root = PROJECT_ROOT / "output"
 operations_summary = build_operations_summary(operations_root)
 
 with st.expander("운영 요약", expanded=True):
@@ -481,7 +390,7 @@ with st.expander("운영 요약", expanded=True):
     documents = operations_summary["documents"]
     if documents:
         counts = operations_summary["counts"]
-        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+        c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns(9)
         c1.metric("결과 폴더", counts["total_outputs"])
         c2.metric("게시 완료", counts["published_outputs"])
         c3.metric("게시 대기", counts["ready_to_publish_outputs"])
@@ -489,6 +398,8 @@ with st.expander("운영 요약", expanded=True):
         c5.metric("부분 완성", counts["partial_outputs"])
         c6.metric("리포트 없음", counts["missing_quality_reports"])
         c7.metric("메타 검토", counts["metadata_review_outputs"])
+        c8.metric("권리 검토", counts["rights_review_outputs"])
+        c9.metric("컴파일 경고", counts["compile_warning_outputs"])
 
         summary_rows = [
             {
@@ -498,6 +409,8 @@ with st.expander("운영 요약", expanded=True):
                 "실패 페이지": ", ".join(str(page) for page in item["failed_pages"]) or "-",
                 "게시": item["publish_status"],
                 "메타데이터 검토": item["metadata_review_summary"] or "-",
+                "권리 검토": item["rights_review_summary"] or "-",
+                "컴파일 경고": item["compile_warning_summary"] or "-",
                 "게시 이슈": item["publish_issue_summary"] or "-",
                 "다음 작업": item["next_action"],
                 "최근 갱신": item["updated_at"] or "-",
@@ -723,6 +636,58 @@ with tabs[3]:
             for row in current_output_summary["metadata_review_rows"]
         ]
         st.dataframe(review_rows, hide_index=True, use_container_width=True)
+
+    if current_output_summary:
+        st.subheader("권리 검토")
+        rights_summary = current_output_summary.get("rights_review_summary")
+        if rights_summary:
+            if current_output_summary.get("rights_needs_manual_review"):
+                st.warning(rights_summary)
+            elif current_output_summary.get("rights_assessment") != "unknown":
+                st.info(rights_summary)
+            else:
+                st.caption(rights_summary)
+        rights_rows = [
+            {
+                "항목": "판단",
+                "값": current_output_summary.get("rights_assessment") or "unknown",
+            },
+            {
+                "항목": "사유",
+                "값": current_output_summary.get("rights_reason") or "-",
+            },
+            {
+                "항목": "소스",
+                "값": current_output_summary.get("rights_source_summary") or "-",
+            },
+            {
+                "항목": "수동 검토 필요",
+                "값": "Yes" if current_output_summary.get("rights_needs_manual_review") else "-",
+            },
+        ]
+        st.dataframe(rights_rows, hide_index=True, use_container_width=True)
+        if current_output_summary.get("rights_warning_rows"):
+            st.caption("권리 경고")
+            st.dataframe(
+                [{"경고": value} for value in current_output_summary["rights_warning_rows"]],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        st.subheader("컴파일 경고")
+        if current_output_summary.get("compile_warning_rows"):
+            compile_rows = [
+                {
+                    "대상": row["target"],
+                    "심각도": row["severity"],
+                    "메시지": row["message"],
+                    "횟수": row["count"],
+                }
+                for row in current_output_summary["compile_warning_rows"]
+            ]
+            st.dataframe(compile_rows, hide_index=True, use_container_width=True)
+        else:
+            st.caption("감지된 문서 수준 컴파일 경고가 없습니다.")
 
     if current_output_name:
         st.subheader("수동 메타데이터 보정")

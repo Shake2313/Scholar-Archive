@@ -3,8 +3,8 @@
 PDF Digitization & Korean Translation Pipeline v2.0
 
 Usage:
-    python pipeline.py --input paper.pdf --name "PaperName" --output ./output
-    python pipeline.py --input paper.pdf --name "PaperName" --output ./output --pages 1-3
+    python -m backend.pipeline --input paper.pdf --name "PaperName" --output ./output
+    python -m backend.pipeline --input paper.pdf --name "PaperName" --output ./output --pages 1-3
 """
 
 import argparse
@@ -12,10 +12,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import sys
 from datetime import datetime
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 # Ensure UTF-8 output on Windows
 if sys.platform == "win32":
@@ -27,7 +32,7 @@ if sys.platform == "win32":
 from dotenv import load_dotenv
 load_dotenv()
 
-from prompts import (
+from backend.prompts import (
     METADATA_SYS, METADATA_USR,
     STEP1_SYS, STEP1_USR,
     STEP2_SYS, STEP2_USR,
@@ -35,15 +40,19 @@ from prompts import (
     STEP6_SYS, STEP6_USR,
     STEP7_SYS, STEP7_USR,
 )
-from publish import (
+from backend.publish import (
     apply_metadata_override,
     build_publish_bundle,
     load_metadata_override,
     metadata_override_path,
     publish_bundle_to_supabase,
+)
+from backend.publish_reports import (
+    build_disabled_publish_report,
+    build_failed_publish_report,
     save_publish_report,
 )
-from steps import (
+from backend.steps import (
     API_RETRY_ATTEMPTS,
     API_TIMEOUT_SEC,
     pdf_to_images,
@@ -580,6 +589,17 @@ def apply_manual_metadata_override(
     return effective, sources, rights, right_sources
 
 
+def _summarize_rights_sources(sources: dict | None) -> str | None:
+    if not isinstance(sources, dict):
+        return None
+    parts = []
+    for field in ("author", "publication_year", "death_year"):
+        source = _clean_metadata_value(sources.get(field))
+        if source:
+            parts.append(f"{field}={source}")
+    return ", ".join(parts) if parts else None
+
+
 def save_metadata_report(output_dir: str, name: str, report: dict) -> str:
     path = metadata_report_path(output_dir, name)
     with open(path, "w", encoding="utf-8") as f:
@@ -597,6 +617,263 @@ def load_metadata_report(output_dir: str, name: str) -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def load_metadata_context(
+    *,
+    output_dir: str,
+    name: str,
+    source_pdf_path: str | None,
+    resume: bool,
+    force_refresh_metadata: bool,
+) -> tuple[dict, dict, dict, dict, bool]:
+    raw_pdf_metadata = extract_pdf_metadata(source_pdf_path) if source_pdf_path else {}
+    deterministic_metadata = {
+        field: None
+        for field in ("title", "author", "publication_year", "death_year")
+    }
+    ai_metadata = normalize_recorded_ai_metadata({})
+    manual_override = load_metadata_override(output_dir, name)
+    metadata_report_reused = False
+    cached_metadata_report = (
+        load_metadata_report(output_dir, name)
+        if resume and not force_refresh_metadata
+        else {}
+    )
+    if cached_metadata_report:
+        raw_pdf_metadata = raw_pdf_metadata or (
+            cached_metadata_report.get("raw_pdf_metadata")
+            if isinstance(cached_metadata_report.get("raw_pdf_metadata"), dict)
+            else {}
+        )
+        deterministic_metadata = (
+            cached_metadata_report.get("deterministic_inference")
+            if isinstance(cached_metadata_report.get("deterministic_inference"), dict)
+            else deterministic_metadata
+        )
+        ai_metadata = normalize_recorded_ai_metadata(
+            cached_metadata_report.get("ai_inference")
+        )
+        metadata_report_reused = True
+    return (
+        raw_pdf_metadata,
+        deterministic_metadata,
+        ai_metadata,
+        manual_override,
+        metadata_report_reused,
+    )
+
+
+def build_metadata_report(
+    *,
+    name: str,
+    raw_pdf_metadata: dict,
+    deterministic_metadata: dict,
+    ai_metadata: dict,
+    manual_override: dict,
+    effective_metadata: dict,
+    effective_sources: dict,
+    rights_metadata: dict,
+    rights_sources: dict,
+) -> dict:
+    return {
+        "checked_at": datetime.now().isoformat(),
+        "paper_name": name,
+        "raw_pdf_metadata": raw_pdf_metadata,
+        "deterministic_inference": deterministic_metadata,
+        "ai_inference": ai_metadata,
+        "manual_override": manual_override,
+        "effective_metadata": effective_metadata,
+        "effective_sources": effective_sources,
+        "rights_metadata": rights_metadata,
+        "rights_sources": rights_sources,
+    }
+
+
+def refresh_metadata_outputs(
+    *,
+    output_dir: str,
+    name: str,
+    author: str | None,
+    publication_year: int | None,
+    death_year: int | None,
+    raw_pdf_metadata: dict,
+    deterministic_metadata: dict,
+    ai_metadata: dict,
+    manual_override: dict,
+) -> tuple[dict, dict, dict, dict, str]:
+    effective_metadata, effective_sources = build_effective_metadata(
+        author,
+        publication_year,
+        death_year,
+        raw_pdf_metadata,
+        deterministic_metadata,
+        ai_metadata,
+    )
+    rights_metadata, rights_sources = build_rights_metadata(
+        author,
+        publication_year,
+        death_year,
+        raw_pdf_metadata,
+        deterministic_metadata,
+        ai_metadata,
+    )
+    (
+        effective_metadata,
+        effective_sources,
+        rights_metadata,
+        rights_sources,
+    ) = apply_manual_metadata_override(
+        effective_metadata,
+        effective_sources,
+        rights_metadata,
+        rights_sources,
+        manual_override,
+    )
+    metadata_report = build_metadata_report(
+        name=name,
+        raw_pdf_metadata=raw_pdf_metadata,
+        deterministic_metadata=deterministic_metadata,
+        ai_metadata=ai_metadata,
+        manual_override=manual_override,
+        effective_metadata=effective_metadata,
+        effective_sources=effective_sources,
+        rights_metadata=rights_metadata,
+        rights_sources=rights_sources,
+    )
+    metadata_report_path_value = save_metadata_report(output_dir, name, metadata_report)
+    return (
+        effective_metadata,
+        effective_sources,
+        rights_metadata,
+        rights_sources,
+        metadata_report_path_value,
+    )
+
+
+def save_rights_report(
+    output_dir: str,
+    name: str,
+    author: str | None,
+    publication_year: int | None,
+    death_year: int | None,
+    *,
+    sources: dict | None = None,
+) -> tuple[dict, str]:
+    rights_info = {
+        "checked_at": datetime.now().isoformat(),
+        **assess_rights(
+            author,
+            publication_year,
+            death_year,
+            sources=sources,
+        ),
+    }
+    rights_path = os.path.join(output_dir, f"{name}_rights_check.json")
+    with open(rights_path, "w", encoding="utf-8") as f:
+        json.dump(rights_info, f, ensure_ascii=False, indent=2)
+    return rights_info, rights_path
+
+
+def resolve_requested_page_numbers(
+    *,
+    total_input_pages: int,
+    pages: str | None,
+    retry_pages: str | None,
+    state_requested_pages,
+) -> tuple[list[int] | None, set[int], list[int]]:
+    page_numbers = None
+    retry_page_numbers: set[int] = set()
+    if retry_pages:
+        selected = parse_page_range(retry_pages, total_input_pages)
+        page_numbers = selected
+        retry_page_numbers = {page_idx + 1 for page_idx in selected}
+        requested_page_numbers = [
+            int(page)
+            for page in (
+                state_requested_pages or list(range(1, total_input_pages + 1))
+            )
+        ]
+        return page_numbers, retry_page_numbers, requested_page_numbers
+    if pages:
+        selected = parse_page_range(pages, total_input_pages)
+        page_numbers = selected
+        requested_page_numbers = [page_idx + 1 for page_idx in selected]
+        return page_numbers, retry_page_numbers, requested_page_numbers
+    requested_page_numbers = list(range(1, total_input_pages + 1))
+    return page_numbers, retry_page_numbers, requested_page_numbers
+
+
+def build_initial_pipeline_state(
+    *,
+    name: str,
+    input_pdf: str,
+    source_pdf_path: str,
+    output_dir: str,
+    requested_page_numbers: list[int],
+    existing_state: dict,
+    pages: str | None,
+    retry_pages: str | None,
+    author: str | None,
+    publication_year: int | None,
+    death_year: int | None,
+    raw_pdf_metadata: dict,
+    metadata_report_path_value: str,
+    effective_metadata: dict,
+    effective_sources: dict,
+    rights_metadata: dict,
+    rights_sources: dict,
+    workers: int,
+    translation_chunk_pages: int,
+    publish_enabled: bool,
+    force_refresh_images: bool,
+    force_refresh_metadata: bool,
+    settings_snapshot: dict,
+    manual_override: dict,
+) -> dict:
+    return {
+        "paper_name": name,
+        "source_pdf": source_pdf_path,
+        "input_pdf": os.path.abspath(input_pdf),
+        "output_dir": os.path.abspath(output_dir),
+        "stdout_log_path": pipeline_stdout_log_path(output_dir, name),
+        "stderr_log_path": pipeline_stderr_log_path(output_dir, name),
+        "requested_pages": requested_page_numbers,
+        "last_rendered_pages": existing_state.get("last_rendered_pages", []),
+        "pages_arg": pages,
+        "retry_pages_arg": retry_pages,
+        "author": author,
+        "publication_year": publication_year,
+        "death_year": death_year,
+        "raw_pdf_metadata": raw_pdf_metadata,
+        "metadata_report_path": metadata_report_path_value,
+        "metadata": effective_metadata,
+        "metadata_sources": effective_sources,
+        "rights_metadata": rights_metadata,
+        "rights_metadata_sources": rights_sources,
+        "workers": workers,
+        "translation_chunk_pages": translation_chunk_pages,
+        "translation_model": TRANSLATION_MODEL,
+        "publish_enabled": publish_enabled,
+        "force_refresh_images": force_refresh_images,
+        "force_refresh_metadata": force_refresh_metadata,
+        "runtime_settings": settings_snapshot,
+        "metadata_override_path": (
+            metadata_override_path(output_dir, name)
+            if manual_override
+            else None
+        ),
+        "layout_profile": existing_state.get("layout_profile"),
+        "current_stage": "step0_images",
+        "last_successful_stage": existing_state.get("last_successful_stage"),
+        "last_error": None,
+        "last_progress_at": datetime.now().isoformat(),
+        "last_progress_note": "Preparing page images.",
+        "checked_at": datetime.now().isoformat(),
+        "failed_pages": existing_state.get("failed_pages", []),
+        "failed_page_details": existing_state.get("failed_page_details", []),
+        "successful_pages": existing_state.get("successful_pages", []),
+    }
 
 
 def parse_page_range(pages_str: str, total: int) -> list[int]:
@@ -617,26 +894,57 @@ def assess_rights(
     author: str | None,
     publication_year: int | None,
     death_year: int | None,
+    *,
+    sources: dict | None = None,
 ) -> dict:
     """Simple rights-check heuristic for logging."""
     current_year = datetime.now().year
+    author_source = _clean_metadata_value((sources or {}).get("author"))
+    publication_year_source = _clean_metadata_value((sources or {}).get("publication_year"))
+    death_year_source = _clean_metadata_value((sources or {}).get("death_year"))
+    source_summary = _summarize_rights_sources(sources)
+    warnings: list[str] = []
+    if publication_year is not None and publication_year > current_year:
+        warnings.append("Publication year is in the future.")
+    if death_year is not None and death_year > current_year:
+        warnings.append("Author death year is in the future.")
     result = {
         "author": author,
         "publication_year": publication_year,
         "death_year": death_year,
         "assessment": "unknown",
         "reason": "Insufficient metadata.",
+        "basis": None,
+        "needs_manual_review": False,
+        "source_summary": source_summary,
+        "warnings": warnings,
     }
+    if warnings:
+        result["needs_manual_review"] = True
+        result["reason"] = warnings[0]
+        return result
     if publication_year is not None and publication_year <= 1929:
         result["assessment"] = "likely_public_domain_us"
         result["reason"] = "Publication year is 1929 or earlier (US heuristic)."
+        result["basis"] = "publication_year"
+        if publication_year_source == "ai_high":
+            result["needs_manual_review"] = True
+            result["reason"] += " Publication year came from AI-inferred metadata; confirm manually."
         return result
     if death_year is not None and current_year - death_year >= 70:
         result["assessment"] = "likely_public_domain_life_plus_70"
         result["reason"] = "Author death year is at least 70 years ago."
+        result["basis"] = "death_year"
+        if death_year_source == "ai_high" or author_source in {"ai_high", "pdf"} or not author:
+            result["needs_manual_review"] = True
+            result["reason"] += " Death year or author identity came from inferred/embedded metadata; confirm manually."
         return result
     if publication_year is not None:
         result["reason"] = "Publication year alone was not enough for this heuristic."
+        result["needs_manual_review"] = True
+    elif death_year is not None:
+        result["reason"] = "Death year alone was not enough for this heuristic."
+        result["needs_manual_review"] = True
     return result
 
 
@@ -644,9 +952,11 @@ def build_rights_context(rights_info: dict) -> str:
     """Build a rights-context note to attach to model prompts."""
     assessment = rights_info.get("assessment", "unknown")
     reason = rights_info.get("reason", "")
+    needs_manual_review = bool(rights_info.get("needs_manual_review"))
     author = rights_info.get("author")
     publication_year = rights_info.get("publication_year")
     death_year = rights_info.get("death_year")
+    source_summary = rights_info.get("source_summary")
     summary = (
         "RIGHTS CONTEXT:\n"
         f"- author: {author}\n"
@@ -654,12 +964,21 @@ def build_rights_context(rights_info: dict) -> str:
         f"- death_year: {death_year}\n"
         f"- assessment: {assessment}\n"
         f"- reason: {reason}\n"
+        f"- needs_manual_review: {needs_manual_review}\n"
     )
+    if source_summary:
+        summary += f"- sources: {source_summary}\n"
     if assessment.startswith("likely_public_domain"):
-        summary += (
-            "The user states this source is public-domain and authorizes faithful transcription.\n"
-            "For this task, treat verbatim transcription as permitted.\n"
-        )
+        if needs_manual_review:
+            summary += (
+                "Rights heuristic suggests public-domain status, but the metadata still needs manual confirmation.\n"
+                "Proceed conservatively if policy restrictions apply.\n"
+            )
+        else:
+            summary += (
+                "Rights heuristic suggests public-domain status and no additional review flag is present.\n"
+                "For this task, treat faithful transcription as permitted.\n"
+            )
     else:
         summary += (
             "Rights status is not confirmed as public-domain by heuristic.\n"
@@ -841,7 +1160,19 @@ def run_metadata_only(
     death_year: int | None,
 ) -> None:
     print("\n[MODE] Running metadata-only rerun...")
-    manual_override = load_metadata_override(output_dir, name)
+    (
+        raw_pdf_metadata,
+        _deterministic_seed,
+        _ai_seed,
+        manual_override,
+        _metadata_report_reused,
+    ) = load_metadata_context(
+        output_dir=output_dir,
+        name=name,
+        source_pdf_path=source_pdf_path,
+        resume=False,
+        force_refresh_metadata=False,
+    )
     state = dict(existing_state)
     state.update(
         {
@@ -885,54 +1216,32 @@ def run_metadata_only(
         structure_json,
         first_page_latex,
     )
-    effective_metadata, effective_sources = build_effective_metadata(
-        author,
-        publication_year,
-        death_year,
-        raw_pdf_metadata,
-        deterministic_metadata,
-        ai_metadata,
-    )
-    rights_metadata, rights_sources = build_rights_metadata(
-        author,
-        publication_year,
-        death_year,
-        raw_pdf_metadata,
-        deterministic_metadata,
-        ai_metadata,
-    )
-    effective_metadata, effective_sources, rights_metadata, rights_sources = apply_manual_metadata_override(
+    (
         effective_metadata,
         effective_sources,
         rights_metadata,
         rights_sources,
-        manual_override,
+        metadata_report_path_value,
+    ) = refresh_metadata_outputs(
+        output_dir=output_dir,
+        name=name,
+        author=author,
+        publication_year=publication_year,
+        death_year=death_year,
+        raw_pdf_metadata=raw_pdf_metadata,
+        deterministic_metadata=deterministic_metadata,
+        ai_metadata=ai_metadata,
+        manual_override=manual_override,
     )
-    metadata_report = {
-        "checked_at": datetime.now().isoformat(),
-        "paper_name": name,
-        "raw_pdf_metadata": raw_pdf_metadata,
-        "deterministic_inference": deterministic_metadata,
-        "ai_inference": ai_metadata,
-        "manual_override": manual_override,
-        "effective_metadata": effective_metadata,
-        "effective_sources": effective_sources,
-        "rights_metadata": rights_metadata,
-        "rights_sources": rights_sources,
-    }
-    metadata_report_path_value = save_metadata_report(output_dir, name, metadata_report)
 
-    rights_info = {
-        "checked_at": datetime.now().isoformat(),
-        **assess_rights(
-            rights_metadata.get("author"),
-            rights_metadata.get("publication_year"),
-            rights_metadata.get("death_year"),
-        ),
-    }
-    rights_path = os.path.join(output_dir, f"{name}_rights_check.json")
-    with open(rights_path, "w", encoding="utf-8") as f:
-        json.dump(rights_info, f, ensure_ascii=False, indent=2)
+    rights_info, _rights_path = save_rights_report(
+        output_dir,
+        name,
+        rights_metadata.get("author"),
+        rights_metadata.get("publication_year"),
+        rights_metadata.get("death_year"),
+        sources=rights_sources,
+    )
 
     state.update(
         {
@@ -1242,71 +1551,36 @@ def run_pipeline(
     translation_model_changed = existing_state.get("translation_model") != TRANSLATION_MODEL
     total_input_pages = get_pdf_page_count(input_pdf)
     images_dir = os.path.join(output_dir, "images")
-    raw_pdf_metadata = extract_pdf_metadata(source_pdf_path)
-    deterministic_metadata = {field: None for field in ("title", "author", "publication_year", "death_year")}
-    ai_metadata = normalize_recorded_ai_metadata({})
-    manual_override = load_metadata_override(output_dir, name)
-    metadata_report_reused = False
-    cached_metadata_report = load_metadata_report(output_dir, name) if resume and not force_refresh_metadata else {}
-    if cached_metadata_report:
-        raw_pdf_metadata = raw_pdf_metadata or (
-            cached_metadata_report.get("raw_pdf_metadata")
-            if isinstance(cached_metadata_report.get("raw_pdf_metadata"), dict)
-            else {}
-        )
-        deterministic_metadata = (
-            cached_metadata_report.get("deterministic_inference")
-            if isinstance(cached_metadata_report.get("deterministic_inference"), dict)
-            else deterministic_metadata
-        )
-        ai_metadata = normalize_recorded_ai_metadata(cached_metadata_report.get("ai_inference"))
-        metadata_report_reused = True
-
-    def refresh_metadata_report() -> tuple[dict, dict, dict, dict]:
-        effective_metadata, effective_sources = build_effective_metadata(
-            author,
-            publication_year,
-            death_year,
-            raw_pdf_metadata,
-            deterministic_metadata,
-            ai_metadata,
-        )
-        rights_metadata, rights_sources = build_rights_metadata(
-            author,
-            publication_year,
-            death_year,
-            raw_pdf_metadata,
-            deterministic_metadata,
-            ai_metadata,
-        )
-        (
-            effective_metadata,
-            effective_sources,
-            rights_metadata,
-            rights_sources,
-        ) = apply_manual_metadata_override(
-            effective_metadata,
-            effective_sources,
-            rights_metadata,
-            rights_sources,
-            manual_override,
-        )
-        metadata_report = {
-            "checked_at": datetime.now().isoformat(),
-            "paper_name": name,
-            "raw_pdf_metadata": raw_pdf_metadata,
-            "deterministic_inference": deterministic_metadata,
-            "ai_inference": ai_metadata,
-            "manual_override": manual_override,
-            "effective_metadata": effective_metadata,
-            "effective_sources": effective_sources,
-            "rights_metadata": rights_metadata,
-            "rights_sources": rights_sources,
-        }
-        save_metadata_report(output_dir, name, metadata_report)
-        return effective_metadata, effective_sources, rights_metadata, rights_sources
-
-    effective_metadata, effective_sources, rights_metadata, rights_sources = refresh_metadata_report()
+    (
+        raw_pdf_metadata,
+        deterministic_metadata,
+        ai_metadata,
+        manual_override,
+        metadata_report_reused,
+    ) = load_metadata_context(
+        output_dir=output_dir,
+        name=name,
+        source_pdf_path=source_pdf_path,
+        resume=resume,
+        force_refresh_metadata=force_refresh_metadata,
+    )
+    (
+        effective_metadata,
+        effective_sources,
+        rights_metadata,
+        rights_sources,
+        metadata_report_path_value,
+    ) = refresh_metadata_outputs(
+        output_dir=output_dir,
+        name=name,
+        author=author,
+        publication_year=publication_year,
+        death_year=death_year,
+        raw_pdf_metadata=raw_pdf_metadata,
+        deterministic_metadata=deterministic_metadata,
+        ai_metadata=ai_metadata,
+        manual_override=manual_override,
+    )
     if metadata_report_reused:
         print("\n[METADATA] Reusing cached metadata report.")
     if manual_override:
@@ -1315,88 +1589,62 @@ def run_pipeline(
             + ", ".join(sorted(manual_override))
         )
     print("\n[RIGHTS] Running rights check heuristic...")
-    meta_author = rights_metadata.get("author")
-    meta_publication_year = rights_metadata.get("publication_year")
-    meta_death_year = rights_metadata.get("death_year")
-
-    rights_info = {
-        "checked_at": datetime.now().isoformat(),
-        **assess_rights(meta_author, meta_publication_year, meta_death_year),
-    }
-    rights_path = os.path.join(output_dir, f"{name}_rights_check.json")
-    with open(rights_path, "w", encoding="utf-8") as f:
-        json.dump(rights_info, f, ensure_ascii=False, indent=2)
+    rights_info, rights_path = save_rights_report(
+        output_dir,
+        name,
+        rights_metadata.get("author"),
+        rights_metadata.get("publication_year"),
+        rights_metadata.get("death_year"),
+        sources=rights_sources,
+    )
     print(f"  Rights check saved: {rights_path}")
     print(f"  Assessment: {rights_info['assessment']} ({rights_info['reason']})")
     rights_context = build_rights_context(rights_info)
 
     # ?? STEP 0: PDF ??Images ????????????????????????????????????????????
     print("\n[STEP 0] Converting PDF to images...")
-    page_numbers = None
-    retry_page_numbers: set[int] = set()
     state_requested_pages = existing_state.get("requested_pages")
+    page_numbers, retry_page_numbers, requested_page_numbers = resolve_requested_page_numbers(
+        total_input_pages=total_input_pages,
+        pages=pages,
+        retry_pages=retry_pages,
+        state_requested_pages=state_requested_pages,
+    )
     if retry_pages:
-        selected = parse_page_range(retry_pages, total_input_pages)
-        page_numbers = selected
-        retry_page_numbers = {page_idx + 1 for page_idx in selected}
-        requested_page_numbers = [
-            int(page)
-            for page in (state_requested_pages or list(range(1, total_input_pages + 1)))
-        ]
         print(f"  Total pages: {total_input_pages}")
-        print(f"  Retrying pages: {[i + 1 for i in selected]}")
+        print(f"  Retrying pages: {[page_idx + 1 for page_idx in page_numbers or []]}")
     elif pages:
-        selected = parse_page_range(pages, total_input_pages)
-        page_numbers = selected
-        requested_page_numbers = [i + 1 for i in selected]
         print(f"  Total pages: {total_input_pages}")
-        print(f"  Selected pages: {[i + 1 for i in selected]}")
+        print(f"  Selected pages: {[page_idx + 1 for page_idx in page_numbers or []]}")
     else:
-        requested_page_numbers = list(range(1, total_input_pages + 1))
         print(f"  Total pages: {total_input_pages}")
 
-    state = {
-        "paper_name": name,
-        "source_pdf": source_pdf_path,
-        "input_pdf": os.path.abspath(input_pdf),
-        "output_dir": os.path.abspath(output_dir),
-        "stdout_log_path": pipeline_stdout_log_path(output_dir, name),
-        "stderr_log_path": pipeline_stderr_log_path(output_dir, name),
-        "requested_pages": requested_page_numbers,
-        "last_rendered_pages": existing_state.get("last_rendered_pages", []),
-        "pages_arg": pages,
-        "retry_pages_arg": retry_pages,
-        "author": author,
-        "publication_year": publication_year,
-        "death_year": death_year,
-        "raw_pdf_metadata": raw_pdf_metadata,
-        "metadata": effective_metadata,
-        "metadata_sources": effective_sources,
-        "rights_metadata": rights_metadata,
-        "rights_metadata_sources": rights_sources,
-        "workers": workers,
-        "translation_chunk_pages": translation_chunk_pages,
-        "translation_model": TRANSLATION_MODEL,
-        "publish_enabled": publish_enabled,
-        "force_refresh_images": force_refresh_images,
-        "force_refresh_metadata": force_refresh_metadata,
-        "runtime_settings": settings_snapshot,
-        "metadata_override_path": (
-            metadata_override_path(output_dir, name)
-            if manual_override
-            else None
-        ),
-        "layout_profile": existing_state.get("layout_profile"),
-        "current_stage": "step0_images",
-        "last_successful_stage": existing_state.get("last_successful_stage"),
-        "last_error": None,
-        "last_progress_at": datetime.now().isoformat(),
-        "last_progress_note": "Preparing page images.",
-        "checked_at": datetime.now().isoformat(),
-        "failed_pages": existing_state.get("failed_pages", []),
-        "failed_page_details": existing_state.get("failed_page_details", []),
-        "successful_pages": existing_state.get("successful_pages", []),
-    }
+    state = build_initial_pipeline_state(
+        name=name,
+        input_pdf=input_pdf,
+        source_pdf_path=source_pdf_path,
+        output_dir=output_dir,
+        requested_page_numbers=requested_page_numbers,
+        existing_state=existing_state,
+        pages=pages,
+        retry_pages=retry_pages,
+        author=author,
+        publication_year=publication_year,
+        death_year=death_year,
+        raw_pdf_metadata=raw_pdf_metadata,
+        metadata_report_path_value=metadata_report_path_value,
+        effective_metadata=effective_metadata,
+        effective_sources=effective_sources,
+        rights_metadata=rights_metadata,
+        rights_sources=rights_sources,
+        workers=workers,
+        translation_chunk_pages=translation_chunk_pages,
+        publish_enabled=publish_enabled,
+        force_refresh_images=force_refresh_images,
+        force_refresh_metadata=force_refresh_metadata,
+        settings_snapshot=settings_snapshot,
+        manual_override=manual_override,
+    )
     save_pipeline_state(output_dir, name, state)
 
     image_paths = []
@@ -1590,13 +1838,30 @@ def run_pipeline(
                 first_structure_json,
                 first_page_latex,
             )
-            effective_metadata, effective_sources, rights_metadata, rights_sources = refresh_metadata_report()
+            (
+                effective_metadata,
+                effective_sources,
+                rights_metadata,
+                rights_sources,
+                metadata_report_path_value,
+            ) = refresh_metadata_outputs(
+                output_dir=output_dir,
+                name=name,
+                author=author,
+                publication_year=publication_year,
+                death_year=death_year,
+                raw_pdf_metadata=raw_pdf_metadata,
+                deterministic_metadata=deterministic_metadata,
+                ai_metadata=ai_metadata,
+                manual_override=manual_override,
+            )
             state.update(
                 {
                     "metadata": effective_metadata,
                     "metadata_sources": effective_sources,
                     "rights_metadata": rights_metadata,
                     "rights_metadata_sources": rights_sources,
+                    "metadata_report_path": metadata_report_path_value,
                 }
             )
             mark_pipeline_stage(
@@ -1617,15 +1882,14 @@ def run_pipeline(
             elif ai_metadata.get("error"):
                 print(f"  [METADATA] AI inference skipped: {ai_metadata['error']}")
 
-            meta_author = rights_metadata.get("author")
-            meta_publication_year = rights_metadata.get("publication_year")
-            meta_death_year = rights_metadata.get("death_year")
-            rights_info = {
-                "checked_at": datetime.now().isoformat(),
-                **assess_rights(meta_author, meta_publication_year, meta_death_year),
-            }
-            with open(rights_path, "w", encoding="utf-8") as f:
-                json.dump(rights_info, f, ensure_ascii=False, indent=2)
+            rights_info, _rights_path = save_rights_report(
+                output_dir,
+                name,
+                rights_metadata.get("author"),
+                rights_metadata.get("publication_year"),
+                rights_metadata.get("death_year"),
+                sources=rights_sources,
+            )
             rights_context = build_rights_context(rights_info)
             print(
                 "  [RIGHTS] Updated from effective metadata "
@@ -1915,12 +2179,7 @@ def run_pipeline(
         },
     )
 
-    publish_report = {
-        "status": "disabled",
-        "reason": "Publishing disabled by configuration.",
-        "slug": None,
-        "published_at": None,
-    }
+    publish_report = build_disabled_publish_report()
     if publish_enabled:
         print("\n[PUBLISH] Publishing archive bundle...")
         try:
@@ -1942,12 +2201,10 @@ def run_pipeline(
             )
             publish_report = publish_bundle_to_supabase(publish_bundle)
         except Exception as exc:
-            publish_report = {
-                "status": "failed",
-                "reason": str(exc).strip() or exc.__class__.__name__,
-                "slug": effective_metadata.get("title") or name,
-                "published_at": None,
-            }
+            publish_report = build_failed_publish_report(
+                slug=effective_metadata.get("title") or name,
+                reason=str(exc).strip() or exc.__class__.__name__,
+            )
         publish_report_path = save_publish_report(output_dir, name, publish_report)
         print(f"  [PUBLISH] Report saved: {publish_report_path}")
         print(

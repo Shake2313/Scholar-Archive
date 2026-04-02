@@ -1,0 +1,245 @@
+{
+  "format": "codex_checklist/v2",
+  "language": "en",
+  "updated_at": "2026-04-03",
+  "project": {
+    "name": "Scholar Archive",
+    "goal": "Turn locally processed historical PDFs into a public archive with faithful source reconstruction, Korean translations, structured metadata, Supabase publishing, and a Vercel frontend.",
+    "public_url": "https://scholar-archive.vercel.app",
+    "workstreams": [
+      "local restoration pipeline",
+      "publishing pipeline",
+      "public web archive"
+    ]
+  },
+  "current_state": [
+    "output/ is the canonical artifact store for generated documents and publishable bundles.",
+    "The local pipeline, publish flow, and republish-from-output flow are implemented end to end.",
+    "The public Supabase schema for documents, pages, and assets is already applied.",
+    "The frontend is live on Vercel at the production URL, and the April 3, 2026 production smoke check confirmed that Supabase connectivity and public asset links are working again.",
+    "Browse, era, author, and document detail pages now behave like a real public archive rather than a placeholder frontend.",
+    "Public routes now fail gracefully when archive data cannot be fetched, instead of failing the Vercel build or collapsing into a misleading empty state.",
+    "A minimal Vitest frontend regression suite now covers browse-state filtering and document-detail viewer state.",
+    "The operations summary exposes pipeline state, metadata review, rights review, compile warnings, and publish failures.",
+    "Checklist tracking now lives in JSON so future updates are easier to automate and diff.",
+    "The release path from publish to deploy to production smoke-check is now documented in a dedicated playbook.",
+    "Live smoke checks now pass across home, browse, author, era, and document detail routes, including public PDF and page-image links."
+  ],
+  "recent_major_changes": [
+    "Converted the checklist from Markdown to English JSON for machine-readable project tracking.",
+    "Strengthened browse filters, fielded search, list sorting, and detail-page reading UX.",
+    "Refactored pipeline, app output loading, publish orchestration, and report helpers into smaller modules with added tests.",
+    "Added publish CLI smoke coverage for both single-output and output-root dry-run flows.",
+    "Patched the frontend from Next.js 15.2.4 to 15.2.8 after a Vercel security block and completed the first production deployment.",
+    "Added graceful archive-unavailable fallbacks so Supabase fetch failures no longer break the public build.",
+    "Added a release playbook and minimal frontend regression coverage with Vitest.",
+    "Restored live Supabase connectivity and revalidated the public site with production smoke checks."
+  ],
+  "stats": {
+    "active_sections": 5,
+    "active_done_items": 34,
+    "active_pending_items": 6,
+    "priority_now": 1,
+    "priority_next": 2,
+    "priority_later": 2,
+    "parking_lot": 2
+  },
+  "priority_queues": {
+    "p0_now": [
+      {
+        "id": "commit_and_push_release_state",
+        "title": "Commit and push the deployment-ready repo state",
+        "status": "pending",
+        "why": "Future Git-triggered deployments can regress if the repository does not match the live Vercel state.",
+        "deliverables": [
+          "Commit the Next.js security upgrade, structure cleanup, and graceful fallback changes.",
+          "Push the branch so the Git-backed deployment path stays aligned with production."
+        ]
+      }
+    ],
+    "p1_next": [
+      {
+        "id": "publish_more_documents",
+        "title": "Expand the public archive with more published outputs",
+        "status": "pending",
+        "why": "The deployed frontend becomes much more useful once the catalog contains multiple documents with varied metadata quality.",
+        "deliverables": [
+          "Identify publish-ready legacy outputs worth exposing publicly.",
+          "Republish selected outputs and verify that they appear correctly on the live site."
+        ]
+      },
+      {
+        "id": "frontend_polish_round_2",
+        "title": "Tighten production UX for reading and discovery",
+        "status": "pending",
+        "why": "Now that the site is live, real-world browsing, outage handling, and reading rough edges are easier to see and prioritize.",
+        "deliverables": [
+          "Refine loading, empty, and error states for server-rendered pages.",
+          "Improve clarity around rights warnings, metadata uncertainty, and document download actions."
+        ]
+      }
+    ],
+    "p2_later": [
+      {
+        "id": "search_and_discovery_upgrade",
+        "title": "Upgrade archive discovery beyond the current fielded filters",
+        "status": "pending",
+        "why": "The current search works, but a larger corpus will need better discovery tools.",
+        "deliverables": [
+          "Review whether catalog search should become full-text, faceted, or both.",
+          "Define a scalable discovery direction before implementing another search round."
+        ]
+      },
+      {
+        "id": "content_quality_backfill",
+        "title": "Backfill metadata and rights review for weaker legacy outputs",
+        "status": "pending",
+        "why": "Public exposure raises the cost of low-confidence metadata and ambiguous rights labels.",
+        "deliverables": [
+          "Audit legacy outputs with weak metadata confidence or rights uncertainty.",
+          "Apply manual overrides where the archive would benefit from cleaner public presentation."
+        ]
+      }
+    ],
+    "parking_lot": [
+      {
+        "id": "analytics",
+        "title": "Add lightweight usage analytics",
+        "status": "idea",
+        "why": "Could help prioritize real user flows once the public archive has traffic.",
+        "deliverables": [
+          "Pick a privacy-appropriate analytics approach if usage data becomes necessary."
+        ]
+      },
+      {
+        "id": "editorial_enrichment",
+        "title": "Add optional editorial context around documents",
+        "status": "idea",
+        "why": "Introductions, notes, or curated collections could make the archive more legible later, but they are not core release work.",
+        "deliverables": [
+          "Decide whether the archive should stay strictly document-first or add editorial layers."
+        ]
+      }
+    ]
+  },
+  "active_checklist": {
+    "runtime_and_operations": {
+      "done": [
+        "Add explicit CLI modes for translation-only, Korean-PDF-only, and metadata-only reruns.",
+        "Reuse cached images and metadata by default, and refresh only the required stages.",
+        "Expose current stage, last successful stage, last error, and timeout/retry settings in pipeline_state.json and the operations summary.",
+        "Add deterministic fixes for recurring XeLaTeX and translation artifacts.",
+        "Add runtime logs, last progress time, and hung-process detection."
+      ],
+      "pending": []
+    },
+    "publishing_and_content_ops": {
+      "done": [
+        "Run a Supabase DNS/API health check before publish.",
+        "Queue only publish-ready output folders and avoid duplicate publish of the same document.",
+        "Document and implement slug conflict handling with overwrite and skip modes.",
+        "Provide a manual correction path for weak metadata before publish.",
+        "Show per-document publish failure reasons in the operations summary."
+      ],
+      "pending": [
+        "Republish additional high-value legacy outputs so the live archive has more depth."
+      ]
+    },
+    "metadata_and_rights": {
+      "done": [
+        "Show AI metadata confidence and evidence in the operations UI.",
+        "Add a manual metadata correction path.",
+        "Make the rights heuristic and UI presentation more conservative.",
+        "Summarize metadata review and compile warnings in the operations UI."
+      ],
+      "pending": [
+        "Review how rights warnings and manual-review markers appear on the live site.",
+        "Backfill manual metadata overrides for public-facing legacy outputs where confidence is still weak."
+      ]
+    },
+    "frontend_and_product": {
+      "done": [
+        "Turn the home screen into a real entry point for recent documents, browsing, and search.",
+        "Document the frontend direction and page-by-page UX based on public classical archive references.",
+        "Tighten era and year grouping based on publication year and century.",
+        "Improve sorting, filtering, and metadata display on list pages.",
+        "Improve source image and source/translation reading UX on the detail page.",
+        "Strengthen fielded search for title, author, year, volume, and issue.",
+        "Add lightweight frontend regression coverage for browse-state filtering and document-detail viewer state.",
+        "Deploy the frontend to Vercel and lock the production URL.",
+        "Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel.",
+        "Patch the frontend from Next.js 15.2.4 to 15.2.8 to satisfy the Vercel security block.",
+        "Make public routes tolerate Supabase fetch failures without breaking the Vercel build."
+      ],
+      "pending": [
+        "Improve production-facing loading, empty, and error states."
+      ]
+    },
+    "code_structure_and_quality": {
+      "done": [
+        "Split run_pipeline() into smaller helper-driven stages to improve maintainability.",
+        "Move app.py output-loading and display helpers into separate helpers.",
+        "Separate publish execution logic from report and batch orchestration logic to improve testability.",
+        "Add an end-to-end publish smoke test.",
+        "Replace the Markdown checklist with an English JSON checklist.",
+        "Document the repeatable publish-to-production release sequence."
+      ],
+      "pending": [
+        "Commit and push the current deployment-ready state so Git-backed deploys stay reproducible."
+      ]
+    }
+  },
+  "completed_history": {
+    "pipeline_stability": [
+      "Add preflight checks for model access, PDF handling, and LaTeX dependencies before full runs.",
+      "Keep going with partial output when some page transcription fails instead of aborting the whole job.",
+      "Add pipeline state and UI support for retrying failed pages.",
+      "Add unit tests for helper functions.",
+      "Document and stabilize the LaTeX auto-fix loop.",
+      "Isolate metadata artifacts so malformed temporary JSON does not break reruns.",
+      "Make Gemini HTTP timeout and retry behavior explicit.",
+      "Make the LaTeX compile timeout configurable by environment variable.",
+      "Add deterministic fixes for pdflatex Unicode issues and the longequal macro."
+    ],
+    "document_restoration_quality": [
+      "Remove the glossary-based cache and DB path and simplify the translation flow.",
+      "Verify that the sample PDF flow no longer suffers from line-break corruption.",
+      "Clean unstable engine-mismatch paths around XeLaTeX warnings.",
+      "Recover the problematic sample document and restore its Korean PDF and metadata report."
+    ],
+    "metadata": [
+      "Add AI metadata extraction for weak PDF metadata.",
+      "Store raw, deterministic, AI, and effective metadata in *_metadata.json.",
+      "Restrict the rights heuristic to high-confidence metadata only."
+    ],
+    "publishing_and_storage": [
+      "Add publish.py for Supabase DB and Storage publishing.",
+      "Define the publishing schema in supabase/schema.sql.",
+      "Connect automatic publish results to *_publish_report.json.",
+      "Add a publish-only path for existing output/ artifacts.",
+      "Add ASCII-safe slug and storage-path handling for Unicode titles and filenames.",
+      "Connect the Supabase MCP flow and apply the schema.",
+      "Allow legacy outputs without *_source.pdf to build publish bundles."
+    ],
+    "web_archive": [
+      "Scaffold frontend/ with the Next.js App Router.",
+      "Build the initial browse, search, and detail page structure.",
+      "Add source image and source/translation reading UI on the detail page.",
+      "Prepare the Vercel deployment and environment-variable structure.",
+      "Complete the first public Vercel deployment and lock the archive URL."
+    ],
+    "operations_support": [
+      "Keep the Windows launcher path.",
+      "Rewrite README around the archive and publishing product goal.",
+      "Add an output-wide operations summary screen."
+    ]
+  },
+  "notes": [
+    "The public archive currently uses the documents, document_pages, and document_assets tables in Supabase.",
+    "Public reads should use the anon key; publishing should use the service-role or secret key.",
+    "The Vercel project root directory is frontend/, but production deploys from the local CLI should be run from the repository root so that the root-directory setting is respected.",
+    "Treat framework security updates as release blockers because Vercel can reject vulnerable versions even when the app code is otherwise healthy.",
+    "The current SUPABASE_URL host in local and Vercel-backed config resolves to a nonexistent DNS name, so live catalog data cannot load until the project URL is corrected.",
+    "Do not treat the deployment milestone as the finish line; production smoke verification and content depth now matter more than infrastructure setup."
+  ]
+}
