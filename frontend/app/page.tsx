@@ -5,8 +5,6 @@ import {
   getAllDocuments,
   getArchiveOverview,
   getRecentDocuments,
-  getTopAuthors,
-  getTopCenturies,
 } from "@/lib/archive";
 import { isSupabaseConfigured } from "@/lib/supabase/server";
 import type { ArchiveDocument } from "@/lib/types";
@@ -21,7 +19,7 @@ export default async function HomePage() {
   try {
     [allDocuments, recentDocuments] = await Promise.all([
       getAllDocuments(),
-      getRecentDocuments(6),
+      getRecentDocuments(3),
     ]);
   } catch (error) {
     console.error("Failed to load archive data for the home page.", error);
@@ -30,8 +28,10 @@ export default async function HomePage() {
   }
 
   const overview = getArchiveOverview(allDocuments);
-  const topAuthors = getTopAuthors(allDocuments, 5);
-  const topCenturies = getTopCenturies(allDocuments, 5);
+  const publicationSpan =
+    overview.earliestYear && overview.latestYear
+      ? `${overview.earliestYear}-${overview.latestYear}`
+      : "Undated";
 
   return (
     <div className="stack">
@@ -40,8 +40,8 @@ export default async function HomePage() {
           <p className="eyebrow">Public archive</p>
           <h1>Scholar Archive</h1>
           <p className="heroCopy">
-            A reading surface for digitized historical papers, source scans,
-            and Korean translations published from the Scholar Archive pipeline.
+            A public reading surface for restored historical papers, source
+            scans, and Korean translations.
           </p>
           <form action="/browse" className="searchBar searchBarWide">
             <input
@@ -64,26 +64,18 @@ export default async function HomePage() {
               Browse by author
             </Link>
           </div>
-          <div className="statsGrid">
-            <div className="statCard">
-              <span className="statValue">{overview.documentCount}</span>
-              <span className="statLabel">Published documents</span>
+          <div className="heroStatStrip">
+            <div className="heroStatChip">
+              <strong>{overview.documentCount}</strong>
+              <span>Published documents</span>
             </div>
-            <div className="statCard">
-              <span className="statValue">{overview.authorCount}</span>
-              <span className="statLabel">Distinct authors</span>
+            <div className="heroStatChip">
+              <strong>{overview.authorCount}</strong>
+              <span>Distinct authors</span>
             </div>
-            <div className="statCard">
-              <span className="statValue">{overview.centuryCount}</span>
-              <span className="statLabel">Century groupings</span>
-            </div>
-            <div className="statCard">
-              <span className="statValue">
-                {overview.earliestYear && overview.latestYear
-                  ? `${overview.earliestYear}-${overview.latestYear}`
-                  : "Undated"}
-              </span>
-              <span className="statLabel">Publication span</span>
+            <div className="heroStatChip">
+              <strong>{publicationSpan}</strong>
+              <span>Publication span</span>
             </div>
           </div>
         </div>
@@ -115,94 +107,12 @@ export default async function HomePage() {
       <section className="sectionPanel">
         <div className="sectionHeader">
           <div>
-            <p className="eyebrow">Entry points</p>
-            <h2>Start from the shape of the archive</h2>
+            <p className="eyebrow">Start reading</p>
+            <h2>Recent entries</h2>
           </div>
-        </div>
-        <div className="entryGrid">
-          <Link className="entryCard" href="/browse">
-            <p className="eyebrow">Catalog</p>
-            <h3>Search everything</h3>
-            <p>
-              Filter by language, rights signal, and sort order across the full
-              public collection.
-            </p>
+          <Link className="secondaryLink" href="/browse">
+            See full catalog
           </Link>
-          <Link className="entryCard" href="/browse/era">
-            <p className="eyebrow">By Era</p>
-            <h3>Trace publication periods</h3>
-            <p>
-              Follow the collection through century labels and publication
-              years.
-            </p>
-          </Link>
-          <Link className="entryCard" href="/browse/author">
-            <p className="eyebrow">By Author</p>
-            <h3>Move through author clusters</h3>
-            <p>
-              Browse the archive through normalized author metadata and repeat
-              appearances.
-            </p>
-          </Link>
-        </div>
-      </section>
-
-      <section className="spotlightGrid">
-        <section className="sectionPanel">
-          <div className="sectionHeader">
-            <div>
-              <p className="eyebrow">Top Eras</p>
-              <h2>Century clusters</h2>
-            </div>
-          </div>
-          <div className="facetList">
-            {topCenturies.map((facet) => (
-              <Link
-                className="facetRow"
-                href={`/browse/era?q=${encodeURIComponent(facet.label)}`}
-                key={facet.label}
-              >
-                <span>{facet.label}</span>
-                <span>{facet.count}</span>
-              </Link>
-            ))}
-            {topCenturies.length === 0 ? (
-              <div className="emptyState compactEmptyState">No era data yet.</div>
-            ) : null}
-          </div>
-        </section>
-
-        <section className="sectionPanel">
-          <div className="sectionHeader">
-            <div>
-              <p className="eyebrow">Top Authors</p>
-              <h2>Frequent names in the archive</h2>
-            </div>
-          </div>
-          <div className="facetList">
-            {topAuthors.map((facet) => (
-              <Link
-                className="facetRow"
-                href={`/browse/author?q=${encodeURIComponent(facet.label)}`}
-                key={facet.label}
-              >
-                <span>{facet.label}</span>
-                <span>{facet.count}</span>
-              </Link>
-            ))}
-            {topAuthors.length === 0 ? (
-              <div className="emptyState compactEmptyState">No author data yet.</div>
-            ) : null}
-          </div>
-        </section>
-      </section>
-
-      <section className="sectionPanel">
-        <div className="sectionHeader">
-          <div>
-            <p className="eyebrow">Recently published</p>
-            <h2>Latest archive entries</h2>
-          </div>
         </div>
         <div className="cardGrid">
           {recentDocuments.map((document) => (

@@ -180,6 +180,33 @@ code {
   gap: 12px;
 }
 
+.heroStatStrip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.heroStatChip {
+  min-width: 140px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.5);
+  display: grid;
+  gap: 4px;
+}
+
+.heroStatChip strong {
+  font-family: var(--font-display), serif;
+  font-size: 1.6rem;
+  line-height: 0.95;
+}
+
+.heroStatChip span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .searchBarWide {
   margin-top: 6px;
 }
@@ -866,6 +893,11 @@ code {
   .statsGrid,
   .entryGrid,
   .cardGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .heroStatStrip {
+    display: grid;
     grid-template-columns: 1fr;
   }
 }
