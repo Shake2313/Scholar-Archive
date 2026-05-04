@@ -852,6 +852,49 @@ code {
   text-align: center;
 }
 
+@keyframes skeletonPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.skeleton {
+  border-radius: 8px;
+  background: rgba(141, 94, 59, 0.1);
+  animation: skeletonPulse 1.6s ease-in-out infinite;
+}
+
+.skeletonLine {
+  height: 1em;
+  border-radius: 6px;
+  background: rgba(141, 94, 59, 0.1);
+  animation: skeletonPulse 1.6s ease-in-out infinite;
+}
+
+.skeletonBlock {
+  border-radius: 20px;
+  background: rgba(141, 94, 59, 0.07);
+  animation: skeletonPulse 1.6s ease-in-out infinite;
+}
+
+.rightsWarning {
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(142, 94, 59, 0.28);
+  background: rgba(255, 248, 238, 0.72);
+  color: var(--accent);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.rightsOk {
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(62, 45, 22, 0.12);
+  background: rgba(255, 255, 255, 0.5);
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
 @media (max-width: 1100px) {
   .viewerShell,
   .viewerPanels,
