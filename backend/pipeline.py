@@ -1109,43 +1109,131 @@ def should_include_page_in_merge(page_num: int, failure_by_page: dict[int, dict]
     return page_num not in failure_by_page
 
 
+def _korean_placeholder_page(page_number: int | None, reason: str) -> str:
+    """Self-contained Korean LaTeX page used when one page's translation is blocked.
+
+    Compatible with merge_pages(): contains \\documentclass preamble + \\begin{document}
+    body + \\end{document}, so split_doc() can extract it during the merge.
+    """
+    page_label = f"페이지 {page_number}" if page_number else "이 페이지"
+    safe_reason = reason.replace("\\", "/").replace("{", "(").replace("}", ")")[:200]
+    return (
+        "\\documentclass[10pt]{article}\n"
+        "\\usepackage{kotex}\n"
+        "\\usepackage{fontspec}\n"
+        "\\setmainfont{Noto Serif CJK KR}\n"
+        "\\begin{document}\n"
+        "\\thispagestyle{empty}\n"
+        "\\begin{center}\n"
+        "\\vspace*{3cm}\n"
+        "{\\Large \\textbf{" + page_label + "의 한국어 번역이 자동 생성되지 못했습니다.}}\\\\[1.5em]\n"
+        "{이 문서의 다른 페이지 번역은 정상적으로 제공됩니다.}\\\\[0.8em]\n"
+        "{원본 페이지는 동봉된 디지털 원문 PDF에서 확인하실 수 있습니다.}\\\\[2em]\n"
+        "{\\small \\textit{사유: " + safe_reason + "}}\n"
+        "\\end{center}\n"
+        "\\end{document}\n"
+    )
+
+
+def _translate_chunk(docs: list[str], chunk_idx: int) -> tuple[str, str | None]:
+    """Translate a list of single-page LaTeX docs as one chunk.
+
+    Returns (korean_latex_chunk, translation_notes_or_None).
+    Raises RuntimeError on safety/recitation block (propagated from call_text).
+    Raises ValueError if the response has no extractable Korean LaTeX block.
+    """
+    chunk_source = merge_pages(docs) if len(docs) > 1 else docs[0]
+    step6_user = STEP6_USR.format(digitalized_latex_source=chunk_source)
+    translation_response = call_text(
+        STEP6_SYS,
+        step6_user,
+        max_tokens=16384,
+        model=TRANSLATION_MODEL,
+    )
+    chunk_korean = extract_block(translation_response, "BEGIN_KOREAN_LATEX")
+    if not chunk_korean:
+        raise ValueError("missing BEGIN_KOREAN_LATEX marker in translation response")
+    chunk_korean = normalize_latex_source(chunk_korean)
+    translation_notes = extract_block(translation_response, "TRANSLATION_NOTES")
+    return chunk_korean, translation_notes
+
+
 def translate_digitalized_latex(
     digitalized_latex: str,
     translation_chunk_pages: int,
     progress_callback=None,
-) -> tuple[str, list[str]]:
-    page_docs = split_latex_into_page_docs(digitalized_latex)
-    groups = chunked(page_docs, translation_chunk_pages) if len(page_docs) > translation_chunk_pages else [page_docs]
+    page_numbers: list[int] | None = None,
+) -> tuple[str, list[str], list[dict]]:
+    """Translate the merged digitalized LaTeX to Korean.
 
-    translated_docs = []
-    notes_all = []
-    for chunk_idx, docs in enumerate(groups, start=1):
+    On chunk-level failure, retries the chunk page-by-page so a single blocked
+    page does not lose the entire chunk. If a page's translation cannot be
+    produced at all, a Korean placeholder page is inserted in its place and the
+    failure is recorded.
+
+    Returns (korean_latex, translation_notes, failed_pages) where failed_pages
+    is a list of {"page_number": int|None, "reason": str} dicts.
+    """
+    page_docs = split_latex_into_page_docs(digitalized_latex)
+    if page_numbers is None or len(page_numbers) != len(page_docs):
+        page_numbers = list(range(1, len(page_docs) + 1))
+
+    paired = list(zip(page_docs, page_numbers))
+    groups = (
+        chunked(paired, translation_chunk_pages)
+        if len(paired) > translation_chunk_pages
+        else [paired]
+    )
+
+    translated_docs: list[str] = []
+    notes_all: list[str] = []
+    failed_pages: list[dict] = []
+
+    for chunk_idx, chunk_pairs in enumerate(groups, start=1):
         if progress_callback:
             progress_callback(chunk_idx, len(groups))
-        chunk_source = merge_pages(docs)
-        print(f"  [TRANSLATE] Translating chunk {chunk_idx}/{len(groups)}...")
-        step6_user = STEP6_USR.format(
-            digitalized_latex_source=chunk_source,
+        chunk_docs = [doc for doc, _ in chunk_pairs]
+        chunk_page_numbers = [pn for _, pn in chunk_pairs]
+        chunk_label = (
+            f"page {chunk_page_numbers[0]}"
+            if len(chunk_page_numbers) == 1
+            else f"pages {chunk_page_numbers[0]}-{chunk_page_numbers[-1]}"
         )
-        translation_response = call_text(
-            STEP6_SYS,
-            step6_user,
-            max_tokens=16384,
-            model=TRANSLATION_MODEL,
-        )
-        chunk_korean = extract_block(translation_response, "BEGIN_KOREAN_LATEX")
-        if not chunk_korean:
-            print("  WARNING: Could not extract Korean LaTeX chunk. Using raw response.")
-            chunk_korean = translation_response
-        chunk_korean = normalize_latex_source(chunk_korean)
-        translated_docs.append(chunk_korean)
+        print(f"  [TRANSLATE] Translating chunk {chunk_idx}/{len(groups)} ({chunk_label})...")
 
-        translation_notes = extract_block(translation_response, "TRANSLATION_NOTES")
-        if translation_notes:
-            notes_all.append(f"--- Chunk {chunk_idx} ---\n{translation_notes}")
+        try:
+            chunk_korean, chunk_notes = _translate_chunk(chunk_docs, chunk_idx)
+            translated_docs.append(chunk_korean)
+            if chunk_notes:
+                notes_all.append(f"--- Chunk {chunk_idx} ---\n{chunk_notes}")
+        except (RuntimeError, ValueError) as exc:
+            print(
+                f"  WARN: Chunk {chunk_idx} translation failed ({exc}). "
+                f"Retrying page-by-page to isolate the blocked page."
+            )
+            for page_doc, page_no in chunk_pairs:
+                try:
+                    single_korean, single_notes = _translate_chunk([page_doc], chunk_idx)
+                    translated_docs.append(single_korean)
+                    if single_notes:
+                        notes_all.append(
+                            f"--- Chunk {chunk_idx} page {page_no} ---\n{single_notes}"
+                        )
+                except (RuntimeError, ValueError) as inner_exc:
+                    reason = str(inner_exc) or inner_exc.__class__.__name__
+                    print(
+                        f"    WARN: Page {page_no} translation blocked ({reason}). "
+                        f"Inserting Korean placeholder page."
+                    )
+                    translated_docs.append(_korean_placeholder_page(page_no, reason))
+                    failed_pages.append({"page_number": page_no, "reason": reason})
+
+    if not translated_docs:
+        # Edge case: empty input or every page failed catastrophically.
+        return "", notes_all, failed_pages
 
     korean_latex = merge_pages(translated_docs) if len(translated_docs) > 1 else translated_docs[0]
-    return korean_latex, notes_all
+    return korean_latex, notes_all, failed_pages
 
 
 def run_metadata_only(
@@ -1317,7 +1405,8 @@ def run_translation_only(
         last_error=None,
         extra={"last_progress_note": "Translating Korean LaTeX."},
     )
-    korean_latex, notes_all = translate_digitalized_latex(
+    successful_page_numbers = normalize_page_numbers(existing_state.get("successful_pages")) or None
+    korean_latex, notes_all, failed_translation_pages = translate_digitalized_latex(
         final_dig_latex,
         translation_chunk_pages,
         progress_callback=lambda chunk_idx, total_chunks: record_pipeline_progress(
@@ -1326,6 +1415,7 @@ def run_translation_only(
             name,
             f"Translating chunk {chunk_idx}/{total_chunks}.",
         ),
+        page_numbers=successful_page_numbers,
     )
 
     korean_tex_path = os.path.join(output_dir, f"{name}_Korean.tex")
@@ -1341,6 +1431,7 @@ def run_translation_only(
         {
             "last_completed_stage": "translation",
             "korean_compiled": False,
+            "failed_translation_pages": failed_translation_pages,
         }
     )
     mark_pipeline_stage(
@@ -2069,6 +2160,7 @@ def run_pipeline(
             "\n[TRANSLATE] Translation model changed to "
             f"{TRANSLATION_MODEL}; regenerating Korean LaTeX..."
         )
+    failed_translation_pages: list[dict] = []
     if (
         resume
         and not force_rebuild_downstream
@@ -2078,10 +2170,11 @@ def run_pipeline(
         print("\n[TRANSLATE] Reusing cached Korean LaTeX...")
         with open(korean_tex_path, encoding="utf-8") as f:
             korean_latex = f.read()
+        failed_translation_pages = state.get("failed_translation_pages") or []
     else:
         print("\n[TRANSLATE] Translating to Korean...")
         print(f"  [TRANSLATE] Model: {TRANSLATION_MODEL}")
-        korean_latex, notes_all = translate_digitalized_latex(
+        korean_latex, notes_all, failed_translation_pages = translate_digitalized_latex(
             final_dig_latex,
             translation_chunk_pages,
             progress_callback=lambda chunk_idx, total_chunks: record_pipeline_progress(
@@ -2090,6 +2183,7 @@ def run_pipeline(
                 name,
                 f"Translating chunk {chunk_idx}/{total_chunks}.",
             ),
+            page_numbers=successful_page_numbers if successful_page_numbers else None,
         )
         with open(korean_tex_path, "w", encoding="utf-8") as f:
             f.write(korean_latex)
@@ -2221,6 +2315,7 @@ def run_pipeline(
             "failed_pages": failed_page_numbers,
             "failed_page_details": failed_page_details,
             "successful_pages": successful_page_numbers,
+            "failed_translation_pages": failed_translation_pages,
             "quality_report_path": quality_report_path,
             "publish_report": publish_report,
             "publish_report_path": publish_report_path,

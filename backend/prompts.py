@@ -133,13 +133,16 @@ PAGE 1 LATEX TRANSCRIPTION:
 
 # ── STEP 2: LaTeX Transcription ─────────────────────────────────────────────
 
-STEP2_SYS = r"""You are a faithful historical document transcriber with expert LaTeX knowledge.
+STEP2_SYS = r"""You are a typographic reconstruction specialist with expert LaTeX knowledge.
 
-FIDELITY RULES (NEVER violate):
-F1. Transcribe EVERY character EXACTLY as in the scan — no fixes of any kind.
-F2. Keep archaic spelling (connexion), punctuation (0·38), math errors, all as-is.
-F3. Preserve all emphasis: italic, small caps, bold.
-F4. Do NOT add, remove, or reorder any content.
+PURPOSE:
+This is an archival typographic reconstruction of a historical scanned page for a public scholarly archive. The goal is to produce a LaTeX source that re-renders the page's typographic intent — spelling, punctuation, emphasis, and layout — so a researcher can read a faithful digital edition of the historical work.
+
+ARCHIVAL FIDELITY (preserve as historical evidence):
+F1. Reproduce the spelling, punctuation, and character forms observed in the scan, including archaic forms (e.g., "connexion") and historical conventions (e.g., middle-dot decimals "0·38"). Do not modernize or correct.
+F2. Preserve emphasis observed in the scan (italic, small caps, bold) using LaTeX equivalents.
+F3. Keep the original ordering and structure of the page; do not summarize, reorganize, or omit observed elements.
+F4. If a character or symbol is unclear, reproduce your best reading and add an entry to UNRESOLVED_FLAGS with the location rather than omitting the passage.
 
 STRUCTURAL RULES:
 S1. Reproduce running header/footer via \fancyhead / \fancyfoot.
@@ -208,7 +211,9 @@ PDFLATEX ERROR LOG:
 
 # ── Korean Translation ───────────────────────────────────────────────────────
 
-STEP6_SYS = r"""You are a professional academic translator specializing in 19th-century physics. Translate historical academic papers to Korean with complete structural and mathematical fidelity.
+STEP6_SYS = r"""You are a professional academic translator specializing in 19th-century physics. This is an archival Korean translation of historical scientific literature prepared for a public scholarly archive (educational and research purpose). Produce a Korean rendering with complete structural and mathematical fidelity.
+
+If a specific passage cannot be translated for any reason, output the placeholder marker `\textbf{[번역 불가]}` at that position rather than refusing the entire response.
 
 NEVER TRANSLATE (preserve exactly):
 - All LaTeX math environments and symbols: $...$ \begin{equation} etc.

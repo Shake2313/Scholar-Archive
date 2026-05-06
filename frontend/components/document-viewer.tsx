@@ -158,10 +158,6 @@ export function DocumentViewer({
               <dd>{document.journal_or_book ?? "Independent manuscript"}</dd>
             </div>
             <div>
-              <dt>Rights</dt>
-              <dd>{rightsLabel}</dd>
-            </div>
-            <div>
               <dt>Pages</dt>
               <dd>
                 {document.page_count} / {document.requested_page_count}
@@ -180,6 +176,21 @@ export function DocumentViewer({
               </div>
             ) : null}
           </dl>
+
+          <div
+            className={
+              rightsLabel === "Likely public domain" ? "rightsOk" : "rightsWarning"
+            }
+            style={{ marginTop: 14 }}
+          >
+            <strong>{rightsLabel}</strong>
+            {rightsLabel !== "Likely public domain" ? (
+              <p style={{ margin: "4px 0 0" }}>
+                Rights status could not be confirmed with high confidence. Verify
+                before reproducing or redistributing this document.
+              </p>
+            ) : null}
+          </div>
         </div>
 
         <div className="viewerSidebarCard">
@@ -208,6 +219,11 @@ export function DocumentViewer({
               <a href={koreanPdfUrl} target="_blank" rel="noreferrer">
                 Korean PDF
               </a>
+            ) : null}
+            {!sourcePdfUrl && !digitalizedPdfUrl && !koreanPdfUrl ? (
+              <p style={{ color: "var(--muted)", fontSize: "0.88rem", margin: 0 }}>
+                No downloadable files are published for this document.
+              </p>
             ) : null}
           </div>
         </div>

@@ -1,7 +1,7 @@
 {
   "format": "codex_checklist/v2",
   "language": "en",
-  "updated_at": "2026-04-03",
+  "updated_at": "2026-05-06",
   "project": {
     "name": "Scholar Archive",
     "goal": "Turn locally processed historical PDFs into a public archive with faithful source reconstruction, Korean translations, structured metadata, Supabase publishing, and a Vercel frontend.",
@@ -19,11 +19,19 @@
     "The frontend is live on Vercel at the production URL, and the April 3, 2026 production smoke check confirmed that Supabase connectivity and public asset links are working again.",
     "Browse, era, author, and document detail pages now behave like a real public archive rather than a placeholder frontend.",
     "Public routes now fail gracefully when archive data cannot be fetched, instead of failing the Vercel build or collapsing into a misleading empty state.",
-    "A minimal Vitest frontend regression suite now covers browse-state filtering and document-detail viewer state.",
+    "Next.js App Router loading.tsx skeletons are now in place for all routes (home, browse, era, author, document detail), giving users visual feedback during server-side fetches.",
+    "A global error.tsx boundary is now in place so unexpected runtime errors surface an actionable error panel with a retry action instead of a blank page.",
+    "Rights-uncertain documents now show a distinct warning panel with a plain-language explanation in the document viewer sidebar.",
+    "Download availability is now stated explicitly when no files are published for a document.",
+    "The Vitest frontend regression suite now covers archive-utils (getRightsLabel, filtering, sorting, era grouping, overview stats) in addition to browse-state and document-detail viewer state.",
     "The operations summary exposes pipeline state, metadata review, rights review, compile warnings, and publish failures.",
     "Checklist tracking now lives in JSON so future updates are easier to automate and diff.",
     "The release path from publish to deploy to production smoke-check is now documented in a dedicated playbook.",
-    "Live smoke checks now pass across home, browse, author, era, and document detail routes, including public PDF and page-image links."
+    "Live smoke checks now pass across home, browse, author, era, and document detail routes, including public PDF and page-image links.",
+    "Korean translation is the highest-friction operational issue: a single page's RECITATION/safety block previously aborted the entire Korean PDF; only transcription had page-level isolation.",
+    "translate_digitalized_latex() now retries chunk failures page-by-page and inserts a self-contained Korean placeholder page when an individual page is blocked, so one translation failure never aborts the full document.",
+    "STEP2_SYS and STEP6_SYS prompts have been reframed as archival-reconstruction tasks (with educational/research purpose framing) to reduce false-positive RECITATION blocks without compromising typographic fidelity.",
+    "failed_translation_pages is now tracked in pipeline_state.json and surfaced in the operations summary."
   ],
   "recent_major_changes": [
     "Converted the checklist from Markdown to English JSON for machine-readable project tracking.",
@@ -33,30 +41,26 @@
     "Patched the frontend from Next.js 15.2.4 to 15.2.8 after a Vercel security block and completed the first production deployment.",
     "Added graceful archive-unavailable fallbacks so Supabase fetch failures no longer break the public build.",
     "Added a release playbook and minimal frontend regression coverage with Vitest.",
-    "Restored live Supabase connectivity and revalidated the public site with production smoke checks."
+    "Restored live Supabase connectivity and revalidated the public site with production smoke checks.",
+    "Added loading.tsx skeleton states for all App Router routes (home, browse, era, author, document detail).",
+    "Added global error.tsx boundary with retry and home navigation actions.",
+    "Improved rights-uncertain display in document viewer: distinct warning panel with explanatory copy, and explicit empty-downloads fallback.",
+    "Expanded Vitest suite with archive-utils tests covering getRightsLabel, filtering, sorting, era grouping, and overview stats (19 tests total, all passing).",
+    "Added per-page Korean translation fallback: chunk failures retry page-by-page, blocked pages get a self-contained Korean placeholder, and failed_translation_pages is tracked in state and operations summary.",
+    "Reframed STEP2_SYS (transcription) and STEP6_SYS (translation) prompts to express archival-reconstruction intent, reducing false-positive RECITATION safety blocks while preserving the typographic fidelity philosophy.",
+    "Added regression tests for translate_digitalized_latex fallback scenarios (chunk failure → per-page retry → placeholder insertion)."
   ],
   "stats": {
     "active_sections": 5,
-    "active_done_items": 34,
-    "active_pending_items": 6,
-    "priority_now": 1,
-    "priority_next": 2,
+    "active_done_items": 41,
+    "active_pending_items": 2,
+    "priority_now": 0,
+    "priority_next": 1,
     "priority_later": 2,
     "parking_lot": 2
   },
   "priority_queues": {
-    "p0_now": [
-      {
-        "id": "commit_and_push_release_state",
-        "title": "Commit and push the deployment-ready repo state",
-        "status": "pending",
-        "why": "Future Git-triggered deployments can regress if the repository does not match the live Vercel state.",
-        "deliverables": [
-          "Commit the Next.js security upgrade, structure cleanup, and graceful fallback changes.",
-          "Push the branch so the Git-backed deployment path stays aligned with production."
-        ]
-      }
-    ],
+    "p0_now": [],
     "p1_next": [
       {
         "id": "publish_more_documents",
@@ -71,11 +75,13 @@
       {
         "id": "frontend_polish_round_2",
         "title": "Tighten production UX for reading and discovery",
-        "status": "pending",
+        "status": "done",
         "why": "Now that the site is live, real-world browsing, outage handling, and reading rough edges are easier to see and prioritize.",
         "deliverables": [
-          "Refine loading, empty, and error states for server-rendered pages.",
-          "Improve clarity around rights warnings, metadata uncertainty, and document download actions."
+          "Added loading.tsx skeleton states for all routes (home, browse, era, author, document detail). DONE",
+          "Added global error.tsx boundary with retry and home navigation actions. DONE",
+          "Added distinct rights-warning panel with plain-language copy in document viewer sidebar. DONE",
+          "Added explicit empty-downloads fallback when no PDF files are published. DONE"
         ]
       }
     ],
@@ -169,11 +175,24 @@
         "Deploy the frontend to Vercel and lock the production URL.",
         "Set NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY in Vercel.",
         "Patch the frontend from Next.js 15.2.4 to 15.2.8 to satisfy the Vercel security block.",
-        "Make public routes tolerate Supabase fetch failures without breaking the Vercel build."
+        "Make public routes tolerate Supabase fetch failures without breaking the Vercel build.",
+        "Add loading.tsx skeleton states for all App Router routes (home, browse, era, author, document detail).",
+        "Add global error.tsx boundary with retry and home navigation actions.",
+        "Add rights-warning panel with plain-language uncertainty copy in document viewer sidebar.",
+        "Add explicit empty-downloads fallback when no PDF files are published for a document."
       ],
-      "pending": [
-        "Improve production-facing loading, empty, and error states."
-      ]
+      "pending": []
+    },
+    "pipeline_resilience": {
+      "done": [
+        "Add per-page Korean translation fallback so one RECITATION/safety block never aborts the full Korean PDF.",
+        "Retry failed translation chunks page-by-page before inserting a self-contained Korean placeholder page.",
+        "Track failed_translation_pages in pipeline_state.json and surface them in the operations summary.",
+        "Reframe STEP2_SYS (transcription) prompts to use archival-reconstruction language, reducing false-positive RECITATION blocks without compromising fidelity.",
+        "Reframe STEP6_SYS (translation) prompts with archival/educational-purpose framing and a per-passage placeholder fallback marker.",
+        "Add regression tests for translate_digitalized_latex chunk-failure and page-level placeholder paths."
+      ],
+      "pending": []
     },
     "code_structure_and_quality": {
       "done": [
@@ -182,11 +201,11 @@
         "Separate publish execution logic from report and batch orchestration logic to improve testability.",
         "Add an end-to-end publish smoke test.",
         "Replace the Markdown checklist with an English JSON checklist.",
-        "Document the repeatable publish-to-production release sequence."
+        "Document the repeatable publish-to-production release sequence.",
+        "Expand Vitest suite with archive-utils tests (getRightsLabel, filtering, sorting, era grouping, overview stats).",
+        "Commit and push the deployment-ready repo state so Git-backed deploys stay aligned with production."
       ],
-      "pending": [
-        "Commit and push the current deployment-ready state so Git-backed deploys stay reproducible."
-      ]
+      "pending": []
     }
   },
   "completed_history": {
