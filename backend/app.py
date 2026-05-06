@@ -30,7 +30,7 @@ from backend.operations import build_operations_summary, summarize_output_direct
 from backend.publish import (
     delete_metadata_override,
     metadata_override_path,
-    write_metadata_override,
+    save_metadata_override,
 )
 from backend.steps import compile_latex
 
@@ -463,8 +463,12 @@ output_path = Path(output_dir)
 current_output_summary = None
 try:
     current_output_summary = summarize_output_directory(output_path)
-except Exception:
+except FileNotFoundError as exc:
     current_output_summary = None
+    st.warning(f"결과 폴더 정보를 불러올 수 없습니다: {exc}")
+except Exception as exc:
+    current_output_summary = None
+    st.warning(f"결과 폴더 분석 중 오류가 발생했습니다: {exc}")
 current_output_name, current_metadata_override = load_manual_metadata_override(output_path)
 current_metadata_report = read_metadata_report(output_path) or {}
 refresh_metadata_editor_state(output_path, current_metadata_override)
@@ -507,7 +511,7 @@ if report_files:
     report_failed_pages = report.get("transcription", {}).get("failed_pages", [])
     if not failed_pages:
         failed_pages = report_failed_pages
-    c5.metric("?ㅽ뙣 ?섏씠吏", len(failed_pages))
+    c5.metric("실패 페이지", len(failed_pages))
     # Fallback: if pipeline log missed the "done" event, mark complete when report exists.
     if st.session_state.get("pipeline_running") and not st.session_state.get("pipeline_error"):
         st.session_state["pipeline_running"] = False
@@ -741,7 +745,7 @@ with tabs[3]:
                 for field, _label in METADATA_OVERRIDE_FIELD_SPECS
             }
             if any(str(value).strip() for value in override_inputs.values()):
-                override_path_value = write_metadata_override(
+                override_path_value = save_metadata_override(
                     output_path,
                     current_output_name,
                     override_inputs,
@@ -782,7 +786,7 @@ with tabs[3]:
 with tabs[4]:
     tex_files = sorted(output_path.glob("*.tex"))
     if tex_files:
-        selected = st.selectbox("?? ??", tex_files, format_func=lambda p: p.name)
+        selected = st.selectbox("TeX 파일 선택", tex_files, format_func=lambda p: p.name)
         default_content = selected.read_text(encoding="utf-8")
         state_key = f"latex_edit_{selected.name}"
         if state_key not in st.session_state:
@@ -790,9 +794,9 @@ with tabs[4]:
 
         left, right = st.columns(2)
         with left:
-            st.subheader("LaTeX ??")
+            st.subheader("LaTeX 편집")
             st.text_area(
-                "?? ??",
+                "편집 영역",
                 key=state_key,
                 height=500,
                 label_visibility="collapsed",
@@ -802,13 +806,13 @@ with tabs[4]:
                 or "\\setmainfont" in st.session_state[state_key]
             ) else "pdflatex"
             compiler = st.selectbox(
-                "????",
+                "컴파일러",
                 ["xelatex", "pdflatex"],
                 index=0 if auto_compiler == "xelatex" else 1,
             )
             col_a, col_b = st.columns(2)
             with col_a:
-                if st.button("???", key=f"compile_{selected.name}", type="primary", width="stretch"):
+                if st.button("컴파일", key=f"compile_{selected.name}", type="primary", width="stretch"):
                     ok, pdf_path, error_log = compile_latex(
                         st.session_state[state_key],
                         str(output_path),
@@ -818,29 +822,29 @@ with tabs[4]:
                     st.session_state[f"compile_ok_{selected.name}"] = ok
                     st.session_state[f"compile_err_{selected.name}"] = error_log
             with col_b:
-                if st.button("?? ??", key=f"reset_{selected.name}", width="stretch"):
+                if st.button("초기화", key=f"reset_{selected.name}", width="stretch"):
                     st.session_state[state_key] = default_content
                     st.rerun()
 
             compile_ok = st.session_state.get(f"compile_ok_{selected.name}")
             compile_err = st.session_state.get(f"compile_err_{selected.name}")
             if compile_ok is True:
-                st.success("??? ??")
+                st.success("컴파일 성공")
             elif compile_ok is False:
-                st.error("??? ??")
+                st.error("컴파일 실패")
                 if compile_err:
                     st.code(compile_err, language="text")
 
         with right:
-            st.subheader("PDF ????")
+            st.subheader("PDF 미리보기")
             pdf_path = output_path / f"{selected.stem}.pdf"
             if pdf_path.exists():
                 pdf_iframe(pdf_path)
-                download_btn(pdf_path, f"{pdf_path.name} ????")
+                download_btn(pdf_path, f"{pdf_path.name} 다운로드")
             else:
-                st.info("PDF? ????. ???? ?? ?????.")
+                st.info("PDF가 없습니다. 컴파일 후 확인하세요.")
     else:
-        st.info("LaTeX ??? ????.")
+        st.info("LaTeX 파일이 없습니다.")
 with tabs[5]:
     note_files = sorted(output_path.glob("*_notes.txt"))
     if note_files:
