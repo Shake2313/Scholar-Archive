@@ -42,10 +42,15 @@ from backend.prompts import (
 )
 from backend.publish import (
     apply_metadata_override,
+    assess_rights,
     build_publish_bundle,
+    extract_pdf_metadata,
+    infer_metadata_from_structure,
     load_metadata_override,
+    METADATA_FIELDS,
     metadata_override_path,
     publish_bundle_to_supabase,
+    split_latex_into_page_docs,
 )
 from backend.publish_reports import (
     build_disabled_publish_report,
@@ -73,18 +78,6 @@ from backend.steps import (
 )
 
 
-METADATA_FIELDS = (
-    "title",
-    "author",
-    "publication_year",
-    "death_year",
-    "journal_or_book",
-    "volume",
-    "issue",
-    "pages",
-    "language",
-    "doi",
-)
 METADATA_CONFIDENCE = {"high", "medium", "low", "none"}
 
 RUN_MODE_FULL = "full"
@@ -307,29 +300,6 @@ def _coerce_year(value) -> int | None:
     return year if 1500 <= year <= 2100 else None
 
 
-def extract_pdf_metadata(pdf_path: str) -> dict:
-    """Read raw PDF metadata and keep the common bibliographic fields."""
-    try:
-        import fitz
-    except Exception:
-        return {}
-
-    raw = {}
-    try:
-        doc = fitz.open(pdf_path)
-        raw = doc.metadata or {}
-        doc.close()
-    except Exception:
-        return {}
-
-    cleaned = {}
-    for key in ("title", "author", "subject", "keywords", "creator", "producer", "creationDate", "modDate"):
-        value = _clean_metadata_value(raw.get(key))
-        if value is not None:
-            cleaned[key] = value
-    return cleaned
-
-
 def extract_json_object(text: str) -> dict | None:
     """Extract the first JSON object from a model response."""
     if not text:
@@ -397,37 +367,6 @@ def normalize_recorded_ai_metadata(raw: dict | None) -> dict:
     normalized["status"] = _clean_metadata_value(payload.get("status")) or "not_run"
     normalized["error"] = _clean_metadata_value(payload.get("error"))
     return normalized
-
-
-def infer_metadata_from_structure(structure_json: str) -> dict:
-    """Infer basic metadata from STEP 1 structure JSON without another model call."""
-    try:
-        data = json.loads(structure_json)
-    except Exception:
-        return {field: None for field in ("title", "author", "publication_year", "death_year")}
-
-    article_header = data.get("article_header", {}) if isinstance(data, dict) else {}
-    title = _clean_metadata_value(article_header.get("title_text"))
-    author_line = _clean_metadata_value(article_header.get("author_line"))
-    author = None
-    if author_line:
-        author = re.sub(r"^(By|Von)\s+", "", author_line, flags=re.IGNORECASE)
-
-    blob = json.dumps(data, ensure_ascii=False)
-    years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", blob)
-    publication_year = int(years[0]) if years else None
-
-    known_death_years = {
-        "emmy noether": 1935,
-        "albert einstein": 1955,
-    }
-    death_year = known_death_years.get(author.lower()) if author else None
-    return {
-        "title": title,
-        "author": author,
-        "publication_year": publication_year,
-        "death_year": death_year,
-    }
 
 
 def infer_metadata_with_ai(
@@ -587,17 +526,6 @@ def apply_manual_metadata_override(
             rights[field] = normalized_override[field]
             right_sources[field] = "manual_override"
     return effective, sources, rights, right_sources
-
-
-def _summarize_rights_sources(sources: dict | None) -> str | None:
-    if not isinstance(sources, dict):
-        return None
-    parts = []
-    for field in ("author", "publication_year", "death_year"):
-        source = _clean_metadata_value(sources.get(field))
-        if source:
-            parts.append(f"{field}={source}")
-    return ", ".join(parts) if parts else None
 
 
 def save_metadata_report(output_dir: str, name: str, report: dict) -> str:
@@ -890,64 +818,6 @@ def parse_page_range(pages_str: str, total: int) -> list[int]:
     return [i for i in indices if 0 <= i < total]
 
 
-def assess_rights(
-    author: str | None,
-    publication_year: int | None,
-    death_year: int | None,
-    *,
-    sources: dict | None = None,
-) -> dict:
-    """Simple rights-check heuristic for logging."""
-    current_year = datetime.now().year
-    author_source = _clean_metadata_value((sources or {}).get("author"))
-    publication_year_source = _clean_metadata_value((sources or {}).get("publication_year"))
-    death_year_source = _clean_metadata_value((sources or {}).get("death_year"))
-    source_summary = _summarize_rights_sources(sources)
-    warnings: list[str] = []
-    if publication_year is not None and publication_year > current_year:
-        warnings.append("Publication year is in the future.")
-    if death_year is not None and death_year > current_year:
-        warnings.append("Author death year is in the future.")
-    result = {
-        "author": author,
-        "publication_year": publication_year,
-        "death_year": death_year,
-        "assessment": "unknown",
-        "reason": "Insufficient metadata.",
-        "basis": None,
-        "needs_manual_review": False,
-        "source_summary": source_summary,
-        "warnings": warnings,
-    }
-    if warnings:
-        result["needs_manual_review"] = True
-        result["reason"] = warnings[0]
-        return result
-    if publication_year is not None and publication_year <= 1929:
-        result["assessment"] = "likely_public_domain_us"
-        result["reason"] = "Publication year is 1929 or earlier (US heuristic)."
-        result["basis"] = "publication_year"
-        if publication_year_source == "ai_high":
-            result["needs_manual_review"] = True
-            result["reason"] += " Publication year came from AI-inferred metadata; confirm manually."
-        return result
-    if death_year is not None and current_year - death_year >= 70:
-        result["assessment"] = "likely_public_domain_life_plus_70"
-        result["reason"] = "Author death year is at least 70 years ago."
-        result["basis"] = "death_year"
-        if death_year_source == "ai_high" or author_source in {"ai_high", "pdf"} or not author:
-            result["needs_manual_review"] = True
-            result["reason"] += " Death year or author identity came from inferred/embedded metadata; confirm manually."
-        return result
-    if publication_year is not None:
-        result["reason"] = "Publication year alone was not enough for this heuristic."
-        result["needs_manual_review"] = True
-    elif death_year is not None:
-        result["reason"] = "Death year alone was not enough for this heuristic."
-        result["needs_manual_review"] = True
-    return result
-
-
 def build_rights_context(rights_info: dict) -> str:
     """Build a rights-context note to attach to model prompts."""
     assessment = rights_info.get("assessment", "unknown")
@@ -985,20 +855,6 @@ def build_rights_context(rights_info: dict) -> str:
             "Proceed conservatively if policy restrictions apply.\n"
         )
     return summary
-
-
-def split_latex_into_page_docs(source: str) -> list[str]:
-    """Split a merged LaTeX document into page-like mini documents by \\newpage."""
-    m_begin = re.search(r"\\begin\{document\}", source)
-    m_end = re.search(r"\\end\{document\}\s*$", source)
-    if not m_begin or not m_end:
-        return [source]
-    preamble = source[: m_begin.end()]
-    body = source[m_begin.end(): m_end.start()]
-    chunks = [c.strip() for c in re.split(r"\n\s*\\newpage\s*\n", body) if c.strip()]
-    if not chunks:
-        return [source]
-    return [f"{preamble}\n{chunk}\n\\end{{document}}" for chunk in chunks]
 
 
 def chunked(items: list, size: int) -> list[list]:

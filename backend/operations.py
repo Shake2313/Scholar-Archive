@@ -10,18 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-METADATA_FIELDS = (
-    "title",
-    "author",
-    "publication_year",
-    "death_year",
-    "journal_or_book",
-    "volume",
-    "issue",
-    "pages",
-    "language",
-    "doi",
-)
+from backend.publish import METADATA_FIELDS
 METADATA_FIELD_LABELS = {
     "title": "Title",
     "author": "Author",

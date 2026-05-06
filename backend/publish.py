@@ -51,7 +51,7 @@ OUTPUT_NAME_SUFFIXES = (
     "_digitalized.tex",
     "_Korean.tex",
 )
-MANUAL_METADATA_FIELDS = (
+METADATA_FIELDS = (
     "title",
     "author",
     "publication_year",
@@ -260,7 +260,7 @@ def normalize_metadata_override(raw: dict[str, Any] | None) -> dict[str, Any]:
     payload = raw if isinstance(raw, dict) else {}
     overrides = payload.get("overrides") if isinstance(payload.get("overrides"), dict) else payload
     normalized: dict[str, Any] = {}
-    for field in MANUAL_METADATA_FIELDS:
+    for field in METADATA_FIELDS:
         value = overrides.get(field)
         if field.endswith("_year"):
             coerced = _coerce_year(value)
@@ -371,7 +371,7 @@ def extract_pdf_metadata(pdf_path: str) -> dict:
     return cleaned
 
 
-def infer_metadata_from_structure_json(structure_json: str) -> dict:
+def infer_metadata_from_structure(structure_json: str) -> dict:
     try:
         data = json.loads(structure_json)
     except Exception:
@@ -388,11 +388,20 @@ def infer_metadata_from_structure_json(structure_json: str) -> dict:
     years = re.findall(r"\b(1[6-9]\d{2}|20\d{2})\b", blob)
     publication_year = int(years[0]) if years else None
 
+    # Hardcoded death years for two specific well-known public-domain authors
+    # to ensure deterministic rights assessment in the absence of AI inference.
+    # Extend only when the data is verifiable from an authoritative source.
+    known_death_years = {
+        "emmy noether": 1935,
+        "albert einstein": 1955,
+    }
+    death_year = known_death_years.get(author.lower()) if author else None
+
     return {
         "title": title,
         "author": author,
         "publication_year": publication_year,
-        "death_year": None,
+        "death_year": death_year,
     }
 
 
@@ -610,7 +619,7 @@ def _discover_first_structure_metadata(output_dir: Path) -> dict:
         match = PAGE_STRUCTURE_PATTERN.fullmatch(path.name)
         if not match:
             continue
-        metadata = infer_metadata_from_structure_json(_load_text(path))
+        metadata = infer_metadata_from_structure(_load_text(path))
         if any(metadata.get(field) for field in ("title", "author", "publication_year")):
             return metadata
     return {field: None for field in ("title", "author", "publication_year", "death_year")}
