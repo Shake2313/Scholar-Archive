@@ -526,6 +526,8 @@ def _next_action(summary: dict[str, Any]) -> str:
         return "Run pipeline"
     if not summary["digitalized_compiled"] or not summary["korean_compiled"]:
         return "Fix PDF compilation"
+    if summary.get("failed_translation_pages"):
+        return "Review translation placeholders"
     if summary.get("rights_needs_manual_review"):
         return "Review rights metadata"
     if summary.get("publish_issue_type") == "missing_file":
@@ -581,6 +583,10 @@ def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
     compile_warning_review = _compile_warnings_from_output(output_path)
 
     failed_pages = _extract_failed_pages(quality_report, pipeline_state)
+    failed_translation_pages = [
+        item for item in ((pipeline_state or {}).get("failed_translation_pages") or [])
+        if isinstance(item, dict)
+    ]
     requested_pages = _coerce_page_numbers((pipeline_state or {}).get("requested_pages"))
     successful_pages = _coerce_page_numbers((pipeline_state or {}).get("successful_pages"))
     successful_page_count = _coerce_int((quality_report or {}).get("transcription", {}).get("successful_pages"))
@@ -644,6 +650,7 @@ def summarize_output_directory(output_dir: str | Path) -> dict[str, Any]:
         "total_pages": total_pages,
         "successful_pages": successful_page_count,
         "failed_pages": failed_pages,
+        "failed_translation_pages": failed_translation_pages,
         "partial_output": partial_output,
         "digitalized_compiled": _reported_pdf_compiled(
             quality_report,
