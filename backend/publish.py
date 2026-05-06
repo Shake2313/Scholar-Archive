@@ -360,7 +360,8 @@ def extract_pdf_metadata(pdf_path: str) -> dict:
         doc = fitz.open(pdf_path)
         raw = doc.metadata or {}
         doc.close()
-    except Exception:
+    except Exception as exc:
+        print(f"  WARNING: Could not read PDF metadata from {pdf_path}: {exc}")
         return {}
 
     cleaned = {}

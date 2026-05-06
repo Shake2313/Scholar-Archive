@@ -27,6 +27,9 @@ TRANSLATION_MODEL = (
 )
 API_TIMEOUT_SEC = int(os.environ.get("API_TIMEOUT_SEC", "180"))
 API_RETRY_ATTEMPTS = max(1, int(os.environ.get("API_RETRY_ATTEMPTS", "2")))
+# genai.Client is thread-safe per Google GenAI Python SDK documentation.
+# pipeline.py uses ThreadPoolExecutor for page-level calls; all threads share
+# this single client instance.
 _GENAI_CLIENT: genai.Client | None = None
 
 
@@ -863,14 +866,10 @@ def prepare_latex_for_compile(source: str, compiler: str = "pdflatex") -> str:
     return prepared
 
 
-def _looks_like_latex_document(source: str) -> bool:
-    src = source.strip()
-    return "\\documentclass" in src or "\\begin{document}" in src
-
-
 def is_latex_document(source: str) -> bool:
     """Public validator used by pipeline guards."""
-    return _looks_like_latex_document(source)
+    src = source.strip()
+    return "\\documentclass" in src or "\\begin{document}" in src
 
 
 def _is_plausible_fix(old_source: str, new_source: str) -> bool:
@@ -1138,7 +1137,7 @@ def auto_fix_loop(
         corrected = extract_block(fix_response, "CORRECTED_LATEX")
         if corrected:
             normalized = prepare_latex_for_compile(corrected, compiler)
-            if _looks_like_latex_document(normalized):
+            if is_latex_document(normalized):
                 if _is_plausible_fix(current_source, normalized):
                     current_source = normalized
                 else:
